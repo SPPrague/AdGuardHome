@@ -6,6 +6,7 @@ import { withTranslation, Trans } from 'react-i18next';
 
 import Card from '../ui/Card';
 import DomainCell from './DomainCell';
+import { DASHBOARD_TABLES_DEFAULT_PAGE_SIZE, TABLES_MIN_ROWS } from '../../helpers/constants';
 
 const TimeCell = ({ value }) => {
     if (!value) {
@@ -37,7 +38,7 @@ const UpstreamAvgTime = ({
     subtitle,
 }) => (
     <Card
-        title={t('average_processing_time')}
+        title={t('average_upstream_response_time')}
         subtitle={subtitle}
         bodyType="card-table"
         refresh={refreshButton}
@@ -54,7 +55,7 @@ const UpstreamAvgTime = ({
                     Cell: DomainCell,
                 },
                 {
-                    Header: <Trans>processing_time</Trans>,
+                    Header: <Trans>response_time</Trans>,
                     accessor: 'count',
                     maxWidth: 190,
                     Cell: TimeCell,
@@ -62,8 +63,8 @@ const UpstreamAvgTime = ({
             ]}
             showPagination={false}
             noDataText={t('no_upstreams_data_found')}
-            minRows={6}
-            defaultPageSize={100}
+            minRows={TABLES_MIN_ROWS}
+            defaultPageSize={DASHBOARD_TABLES_DEFAULT_PAGE_SIZE}
             className="-highlight card-table-overflow--limited stats__table"
         />
     </Card>

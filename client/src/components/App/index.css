@@ -118,6 +118,11 @@ body {
     overflow-y: auto;
 }
 
+.modal-body--filters {
+    max-height: 600px;
+    overflow-y: auto;
+}
+
 .modal-body__item:not(:first-child) {
     padding-top: 1.5rem;
 }
@@ -132,15 +137,6 @@ body {
 
 .cursor--not-allowed {
     cursor: not-allowed;
-}
-
-.button-action {
-    visibility: hidden;
-}
-
-.logs__row:hover .button-action,
-.button-action--active {
-    visibility: visible;
 }
 
 .ReactModal__Body--open {

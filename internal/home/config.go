@@ -10,7 +10,7 @@ import (
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghalg"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghtls"
-	"github.com/AdguardTeam/AdGuardHome/internal/confmigrate"
+	"github.com/AdguardTeam/AdGuardHome/internal/configmigrate"
 	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
 	"github.com/AdguardTeam/AdGuardHome/internal/dnsforward"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
@@ -20,9 +20,9 @@ import (
 	"github.com/AdguardTeam/dnsproxy/fastip"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
+	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/AdguardTeam/golibs/timeutil"
 	"github.com/google/renameio/v2/maybe"
-	"golang.org/x/exp/slices"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -116,6 +116,8 @@ type configuration struct {
 	// Theme is a UI theme for current user.
 	Theme Theme `yaml:"theme"`
 
+	// TODO(a.garipov): Make DNS and the fields below pointers and validate
+	// and/or reset on explicit nulling.
 	DNS      dnsConfig         `yaml:"dns"`
 	TLS      tlsConfigSettings `yaml:"tls"`
 	QueryLog queryLogConfig    `yaml:"querylog"`
@@ -147,7 +149,9 @@ type configuration struct {
 
 	sync.RWMutex `yaml:"-"`
 
-	SchemaVersion int `yaml:"schema_version"` // keeping last so that users will be less tempted to change it -- used when upgrading between versions
+	// SchemaVersion is the version of the configuration schema.  See
+	// [configmigrate.LastSchemaVersion].
+	SchemaVersion uint `yaml:"schema_version"`
 }
 
 // httpConfig is a block with HTTP configuration params.
@@ -181,7 +185,7 @@ type httpPprofConfig struct {
 // not absolutely necessary.
 type dnsConfig struct {
 	BindHosts []netip.Addr `yaml:"bind_hosts"`
-	Port      int          `yaml:"port"`
+	Port      uint16       `yaml:"port"`
 
 	// AnonymizeClientIP defines if clients' IP addresses should be anonymized
 	// in query log and statistics.
@@ -197,7 +201,7 @@ type dnsConfig struct {
 
 	// PrivateNets is the set of IP networks for which the private reverse DNS
 	// resolver should be used.
-	PrivateNets []string `yaml:"private_networks"`
+	PrivateNets []netutil.Prefix `yaml:"private_networks"`
 
 	// UsePrivateRDNS defines if the PTR requests for unknown addresses from
 	// locally-served networks should be resolved via private PTR resolvers.
@@ -213,31 +217,38 @@ type dnsConfig struct {
 	// DNS64Prefixes is the list of NAT64 prefixes to be used for DNS64.
 	DNS64Prefixes []netip.Prefix `yaml:"dns64_prefixes"`
 
-	// ServeHTTP3 defines if HTTP/3 is be allowed for incoming requests.
+	// ServeHTTP3 defines if HTTP/3 is allowed for incoming requests.
 	//
 	// TODO(a.garipov): Add to the UI when HTTP/3 support is no longer
 	// experimental.
 	ServeHTTP3 bool `yaml:"serve_http3"`
 
-	// UseHTTP3Upstreams defines if HTTP/3 is be allowed for DNS-over-HTTPS
+	// UseHTTP3Upstreams defines if HTTP/3 is allowed for DNS-over-HTTPS
 	// upstreams.
 	//
 	// TODO(a.garipov): Add to the UI when HTTP/3 support is no longer
 	// experimental.
 	UseHTTP3Upstreams bool `yaml:"use_http3_upstreams"`
+
+	// ServePlainDNS defines if plain DNS is allowed for incoming requests.
+	ServePlainDNS bool `yaml:"serve_plain_dns"`
+
+	// HostsFileEnabled defines whether to use information from the system hosts
+	// file to resolve queries.
+	HostsFileEnabled bool `yaml:"hostsfile_enabled"`
 }
 
 type tlsConfigSettings struct {
 	Enabled         bool   `yaml:"enabled" json:"enabled"`                                 // Enabled is the encryption (DoT/DoH/HTTPS) status
 	ServerName      string `yaml:"server_name" json:"server_name,omitempty"`               // ServerName is the hostname of your HTTPS/TLS server
 	ForceHTTPS      bool   `yaml:"force_https" json:"force_https"`                         // ForceHTTPS: if true, forces HTTP->HTTPS redirect
-	PortHTTPS       int    `yaml:"port_https" json:"port_https,omitempty"`                 // HTTPS port. If 0, HTTPS will be disabled
-	PortDNSOverTLS  int    `yaml:"port_dns_over_tls" json:"port_dns_over_tls,omitempty"`   // DNS-over-TLS port. If 0, DoT will be disabled
-	PortDNSOverQUIC int    `yaml:"port_dns_over_quic" json:"port_dns_over_quic,omitempty"` // DNS-over-QUIC port. If 0, DoQ will be disabled
+	PortHTTPS       uint16 `yaml:"port_https" json:"port_https,omitempty"`                 // HTTPS port. If 0, HTTPS will be disabled
+	PortDNSOverTLS  uint16 `yaml:"port_dns_over_tls" json:"port_dns_over_tls,omitempty"`   // DNS-over-TLS port. If 0, DoT will be disabled
+	PortDNSOverQUIC uint16 `yaml:"port_dns_over_quic" json:"port_dns_over_quic,omitempty"` // DNS-over-QUIC port. If 0, DoQ will be disabled
 
 	// PortDNSCrypt is the port for DNSCrypt requests.  If it's zero,
 	// DNSCrypt is disabled.
-	PortDNSCrypt int `yaml:"port_dnscrypt" json:"port_dnscrypt"`
+	PortDNSCrypt uint16 `yaml:"port_dnscrypt" json:"port_dnscrypt"`
 	// DNSCryptConfigFile is the path to the DNSCrypt config file.  Must be
 	// set if PortDNSCrypt is not zero.
 	//
@@ -252,6 +263,10 @@ type tlsConfigSettings struct {
 }
 
 type queryLogConfig struct {
+	// DirPath is the custom directory for logs.  If it's empty the default
+	// directory will be used.  See [homeContext.getDataDir].
+	DirPath string `yaml:"dir_path"`
+
 	// Ignored is the list of host names, which should not be written to log.
 	// "." is considered to be the root domain.
 	Ignored []string `yaml:"ignored"`
@@ -261,7 +276,7 @@ type queryLogConfig struct {
 
 	// MemSize is the number of entries kept in memory before they are flushed
 	// to disk.
-	MemSize uint32 `yaml:"size_memory"`
+	MemSize uint `yaml:"size_memory"`
 
 	// Enabled defines if the query log is enabled.
 	Enabled bool `yaml:"enabled"`
@@ -271,6 +286,10 @@ type queryLogConfig struct {
 }
 
 type statsConfig struct {
+	// DirPath is the custom directory for statistics.  If it's empty the
+	// default directory is used.  See [homeContext.getDataDir].
+	DirPath string `yaml:"dir_path"`
+
 	// Ignored is the list of host names, which should not be counted.
 	Ignored []string `yaml:"ignored"`
 
@@ -280,6 +299,12 @@ type statsConfig struct {
 	// Enabled defines if the statistics are enabled.
 	Enabled bool `yaml:"enabled"`
 }
+
+// Default block host constants.
+const (
+	defaultSafeBrowsingBlockHost = "standard-block.dns.adguard.com"
+	defaultParentalBlockHost     = "family-block.dns.adguard.com"
+)
 
 // config is the global configuration structure.
 //
@@ -299,16 +324,22 @@ var config = &configuration{
 		BindHosts: []netip.Addr{netip.IPv4Unspecified()},
 		Port:      defaultPortDNS,
 		Config: dnsforward.Config{
-			Ratelimit:  20,
-			RefuseAny:  true,
-			AllServers: false,
-			HandleDDR:  true,
+			Ratelimit:              20,
+			RatelimitSubnetLenIPv4: 24,
+			RatelimitSubnetLenIPv6: 56,
+			RefuseAny:              true,
+			UpstreamMode:           dnsforward.UpstreamModeLoadBalance,
+			HandleDDR:              true,
 			FastestTimeout: timeutil.Duration{
 				Duration: fastip.DefaultPingWaitTimeout,
 			},
 
-			TrustedProxies: []string{"127.0.0.0/8", "::1/128"},
-			CacheSize:      4 * 1024 * 1024,
+			TrustedProxies: []netutil.Prefix{{
+				Prefix: netip.MustParsePrefix("127.0.0.0/8"),
+			}, {
+				Prefix: netip.MustParsePrefix("::1/128"),
+			}},
+			CacheSize: 4 * 1024 * 1024,
 
 			EDNSClientSubnet: &dnsforward.EDNSClientSubnet{
 				CustomIP:  netip.Addr{},
@@ -322,8 +353,10 @@ var config = &configuration{
 			// was later increased to 300 due to https://github.com/AdguardTeam/AdGuardHome/issues/2257
 			MaxGoroutines: 300,
 		},
-		UpstreamTimeout: timeutil.Duration{Duration: dnsforward.DefaultTimeout},
-		UsePrivateRDNS:  true,
+		UpstreamTimeout:  timeutil.Duration{Duration: dnsforward.DefaultTimeout},
+		UsePrivateRDNS:   true,
+		ServePlainDNS:    true,
+		HostsFileEnabled: true,
 	},
 	TLS: tlsConfigSettings{
 		PortHTTPS:       defaultPortHTTPS,
@@ -388,6 +421,9 @@ var config = &configuration{
 			Schedule: schedule.EmptyWeekly(),
 			IDs:      []string{},
 		},
+
+		ParentalBlockHost:     defaultParentalBlockHost,
+		SafeBrowsingBlockHost: defaultSafeBrowsingBlockHost,
 	},
 	DHCP: &dhcpd.ServerConfig{
 		LocalDomainName: "lan",
@@ -416,24 +452,29 @@ var config = &configuration{
 		MaxAge:     3,
 	},
 	OSConfig:      &osConfig{},
-	SchemaVersion: confmigrate.CurrentSchemaVersion,
+	SchemaVersion: configmigrate.LastSchemaVersion,
 	Theme:         ThemeAuto,
 }
 
-// getConfigFilename returns path to the current config file
-func (c *configuration) getConfigFilename() string {
-	configFile, err := filepath.EvalSymlinks(Context.configFilename)
+// configFilePath returns the absolute path to the symlink-evaluated path to the
+// current config file.
+func configFilePath() (confPath string) {
+	confPath, err := filepath.EvalSymlinks(Context.confFilePath)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			log.Error("unexpected error while config file path evaluation: %s", err)
+		confPath = Context.confFilePath
+		logFunc := log.Error
+		if errors.Is(err, os.ErrNotExist) {
+			logFunc = log.Debug
 		}
-		configFile = Context.configFilename
-	}
-	if !filepath.IsAbs(configFile) {
-		configFile = filepath.Join(Context.workDir, configFile)
+
+		logFunc("evaluating config path: %s; using %q", err, confPath)
 	}
 
-	return configFile
+	if !filepath.IsAbs(confPath) {
+		confPath = filepath.Join(Context.workDir, confPath)
+	}
+
+	return confPath
 }
 
 // validateBindHosts returns error if any of binding hosts from configuration is
@@ -461,17 +502,23 @@ func parseConfig() (err error) {
 		return err
 	}
 
-	migrator := confmigrate.New(&confmigrate.Config{
+	migrator := configmigrate.New(&configmigrate.Config{
 		WorkingDir: Context.workDir,
 	})
 
 	var upgraded bool
-	config.fileData, upgraded, err = migrator.Migrate(config.fileData)
+	config.fileData, upgraded, err = migrator.Migrate(
+		config.fileData,
+		configmigrate.LastSchemaVersion,
+	)
 	if err != nil {
 		// Don't wrap the error, because it's informative enough as is.
 		return err
 	} else if upgraded {
-		err = maybe.WriteFile(config.getConfigFilename(), config.fileData, 0o644)
+		confPath := configFilePath()
+		log.Debug("writing config file %q after config upgrade", confPath)
+
+		err = maybe.WriteFile(confPath, config.fileData, 0o644)
 		if err != nil {
 			return fmt.Errorf("writing new config: %w", err)
 		}
@@ -492,12 +539,8 @@ func parseConfig() (err error) {
 		config.DNS.UpstreamTimeout = timeutil.Duration{Duration: dnsforward.DefaultTimeout}
 	}
 
-	err = setContextTLSCipherIDs()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	// Do not wrap the error because it's informative enough as is.
+	return setContextTLSCipherIDs()
 }
 
 // validateConfig returns error if the configuration is invalid.
@@ -541,10 +584,10 @@ func validateConfig() (err error) {
 }
 
 // udpPort is the port number for UDP protocol.
-type udpPort int
+type udpPort uint16
 
 // tcpPort is the port number for TCP protocol.
-type tcpPort int
+type tcpPort uint16
 
 // addPorts is a helper for ports validation that skips zero ports.
 func addPorts[T tcpPort | udpPort](uc aghalg.UniqChecker[T], ports ...T) {
@@ -561,11 +604,11 @@ func readConfigFile() (fileData []byte, err error) {
 		return config.fileData, nil
 	}
 
-	name := config.getConfigFilename()
-	log.Debug("reading config file: %s", name)
+	confPath := configFilePath()
+	log.Debug("reading config file %q", confPath)
 
 	// Do not wrap the error because it's informative enough as is.
-	return os.ReadFile(name)
+	return os.ReadFile(confPath)
 }
 
 // Saves configuration to the YAML file and also saves the user filter contents to a file
@@ -574,7 +617,7 @@ func (c *configuration) write() (err error) {
 	defer c.Unlock()
 
 	if Context.auth != nil {
-		config.Users = Context.auth.GetUsers()
+		config.Users = Context.auth.usersList()
 	}
 
 	if Context.tls != nil {
@@ -589,7 +632,6 @@ func (c *configuration) write() (err error) {
 		config.Stats.Interval = timeutil.Duration{Duration: statsConf.Limit}
 		config.Stats.Enabled = statsConf.Enabled
 		config.Stats.Ignored = statsConf.Ignored.Values()
-		slices.Sort(config.Stats.Ignored)
 	}
 
 	if Context.queryLog != nil {
@@ -601,7 +643,6 @@ func (c *configuration) write() (err error) {
 		config.QueryLog.Interval = timeutil.Duration{Duration: dc.RotationIvl}
 		config.QueryLog.MemSize = dc.MemSize
 		config.QueryLog.Ignored = dc.Ignored.Values()
-		slices.Sort(config.Stats.Ignored)
 	}
 
 	if Context.filters != nil {
@@ -631,8 +672,8 @@ func (c *configuration) write() (err error) {
 
 	config.Clients.Persistent = Context.clients.forConfig()
 
-	configFile := config.getConfigFilename()
-	log.Debug("writing config file %q", configFile)
+	confPath := configFilePath()
+	log.Debug("writing config file %q", confPath)
 
 	buf := &bytes.Buffer{}
 	enc := yaml.NewEncoder(buf)
@@ -643,7 +684,7 @@ func (c *configuration) write() (err error) {
 		return fmt.Errorf("generating config file: %w", err)
 	}
 
-	err = maybe.WriteFile(configFile, buf.Bytes(), 0o644)
+	err = maybe.WriteFile(confPath, buf.Bytes(), 0o644)
 	if err != nil {
 		return fmt.Errorf("writing config file: %w", err)
 	}

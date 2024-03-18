@@ -34,9 +34,16 @@ func TestServer_FilterDNSRewrite(t *testing.T) {
 	}
 
 	// Helper functions and entities.
-	srv := &Server{
-		dnsFilter: &filtering.DNSFilter{},
-	}
+	srv := createTestServer(t, &filtering.Config{
+		BlockingMode: filtering.BlockingModeDefault,
+	}, ServerConfig{
+		Config: Config{
+			UpstreamMode:     UpstreamModeLoadBalance,
+			EDNSClientSubnet: &EDNSClientSubnet{Enabled: false},
+		},
+		ServePlainDNS: true,
+	})
+
 	makeQ := func(qtype rules.RRType) (req *dns.Msg) {
 		return &dns.Msg{
 			Question: []dns.Question{{

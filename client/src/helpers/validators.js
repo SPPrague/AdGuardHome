@@ -1,5 +1,4 @@
 import i18next from 'i18next';
-import stringLength from 'string-length';
 
 import {
     MAX_PORT,
@@ -14,7 +13,10 @@ import {
     UNSAFE_PORTS,
     R_CLIENT_ID,
     R_DOMAIN,
+    MAX_PASSWORD_LENGTH,
     MIN_PASSWORD_LENGTH,
+    R_IPV4_SUBNET,
+    R_IPV6_SUBNET,
 } from './constants';
 import { ip4ToInt, isValidAbsolutePath } from './form';
 import { isIpInCidr, parseSubnetMask } from './helpers';
@@ -327,12 +329,31 @@ export const validateIpv4InCidr = (valueIp, allValues) => {
 
 /**
  * @param value {string}
+ * @returns {number}
+ */
+const utf8StringLength = (value) => {
+    const encoder = new TextEncoder();
+    const view = encoder.encode(value);
+
+    return view.length;
+};
+
+/**
+ * @param value {string}
  * @returns {Function}
  */
 export const validatePasswordLength = (value) => {
-    if (value && stringLength(value) < MIN_PASSWORD_LENGTH) {
-        return i18next.t('form_error_password_length', { value: MIN_PASSWORD_LENGTH });
+    if (value) {
+        const length = utf8StringLength(value);
+        if (length < MIN_PASSWORD_LENGTH || length > MAX_PASSWORD_LENGTH) {
+            // TODO: Make the i18n clearer with regards to bytes vs. characters.
+            return i18next.t('form_error_password_length', {
+                min: MIN_PASSWORD_LENGTH,
+                max: MAX_PASSWORD_LENGTH,
+            });
+        }
     }
+
     return undefined;
 };
 
@@ -344,5 +365,42 @@ export const validateIpGateway = (value, allValues) => {
     if (value === allValues.gatewayIp) {
         return i18next.t('form_error_gateway_ip');
     }
+    return undefined;
+};
+
+/**
+ * @param value {string}
+ * @returns {Function}
+ */
+export const validateIPv4Subnet = (value) => {
+    if (!R_IPV4_SUBNET.test(value)) {
+        return i18next.t('rate_limit_subnet_len_ipv4_error');
+    }
+    return undefined;
+};
+
+/**
+ * @param value {string}
+ * @returns {Function}
+ */
+export const validateIPv6Subnet = (value) => {
+    if (!R_IPV6_SUBNET.test(value)) {
+        return i18next.t('rate_limit_subnet_len_ipv6_error');
+    }
+    return undefined;
+};
+
+/**
+ * @returns {undefined|string}
+ * @param value
+ * @param allValues
+ */
+export const validatePlainDns = (value, allValues) => {
+    const { enabled } = allValues;
+
+    if (!enabled && !value) {
+        return 'encryption_plain_dns_error';
+    }
+
     return undefined;
 };

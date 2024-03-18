@@ -26,7 +26,12 @@ export const R_WIN_ABSOLUTE_PATH = /^([a-zA-Z]:)?(\\|\/)(?:[^\\/:*?"<>|\x00]+\\)
 
 export const R_CLIENT_ID = /^[a-z0-9-]{1,63}$/;
 
+export const R_IPV4_SUBNET = /^([0-9]|[1-2][0-9]|3[0-2])?$/;
+
+export const R_IPV6_SUBNET = /^([0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])?$/;
+
 export const MIN_PASSWORD_LENGTH = 8;
+export const MAX_PASSWORD_LENGTH = 72;
 
 export const HTML_PAGES = {
     INSTALL: '/install.html',
@@ -175,6 +180,10 @@ export const MODAL_TYPE = {
     CHOOSE_FILTERING_LIST: 'CHOOSE_FILTERING_LIST',
     ADD_REWRITE: 'ADD_REWRITE',
     EDIT_REWRITE: 'EDIT_REWRITE',
+    EDIT_LEASE: 'EDIT_LEASE',
+    ADD_LEASE: 'ADD_LEASE',
+    ADD_CLIENT: 'ADD_CLIENT',
+    EDIT_CLIENT: 'EDIT_CLIENT',
 };
 
 export const CLIENT_ID = {
@@ -429,7 +438,7 @@ export const SCHEME_TO_PROTOCOL_MAP = {
 export const DNS_REQUEST_OPTIONS = {
     PARALLEL: 'parallel',
     FASTEST_ADDR: 'fastest_addr',
-    LOAD_BALANCING: '',
+    LOAD_BALANCING: 'load_balance',
 };
 
 export const DHCP_FORM_NAMES = {
@@ -551,6 +560,13 @@ export const DISABLE_PROTECTION_TIMINGS = {
     TOMORROW: 24 * 60 * 60 * 1000,
 };
 
-export const LOCAL_STORAGE_THEME_KEY = 'account_theme';
-
 export const LOCAL_TIMEZONE_VALUE = 'Local';
+
+export const TABLES_MIN_ROWS = 5;
+
+export const DASHBOARD_TABLES_DEFAULT_PAGE_SIZE = 100;
+
+export const TIME_UNITS = {
+    HOURS: 'hours',
+    DAYS: 'days',
+};

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
+	"github.com/AdguardTeam/AdGuardHome/internal/dhcpsvc"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/netutil"
@@ -31,7 +32,7 @@ type v6Server struct {
 	sid  dhcpv6.DUID
 	srv  *server6.Server
 
-	leases     []*Lease
+	leases     []*dhcpsvc.Lease
 	leasesLock sync.Mutex
 	ipAddrs    [256]byte
 }
@@ -87,8 +88,11 @@ func (s *v6Server) IPByHost(host string) (ip netip.Addr) {
 }
 
 // ResetLeases resets leases.
-func (s *v6Server) ResetLeases(leases []*Lease) (err error) {
+func (s *v6Server) ResetLeases(leases []*dhcpsvc.Lease) (err error) {
 	defer func() { err = errors.Annotate(err, "dhcpv6: %w") }()
+
+	s.leasesLock.Lock()
+	defer s.leasesLock.Unlock()
 
 	s.leases = nil
 	for _, l := range leases {
@@ -108,12 +112,14 @@ func (s *v6Server) ResetLeases(leases []*Lease) (err error) {
 
 // GetLeases returns the list of current DHCP leases.  It is safe for concurrent
 // use.
-func (s *v6Server) GetLeases(flags GetLeasesFlags) (leases []*Lease) {
+func (s *v6Server) GetLeases(flags GetLeasesFlags) (leases []*dhcpsvc.Lease) {
 	// The function shouldn't return nil value because zero-length slice
 	// behaves differently in cases like marshalling.  Our front-end also
 	// requires non-nil value in the response.
-	leases = []*Lease{}
+	leases = []*dhcpsvc.Lease{}
 	s.leasesLock.Lock()
+	defer s.leasesLock.Unlock()
+
 	for _, l := range s.leases {
 		if l.IsStatic {
 			if (flags & LeasesStatic) != 0 {
@@ -125,12 +131,12 @@ func (s *v6Server) GetLeases(flags GetLeasesFlags) (leases []*Lease) {
 			}
 		}
 	}
-	s.leasesLock.Unlock()
+
 	return leases
 }
 
 // getLeasesRef returns the actual leases slice.  For internal use only.
-func (s *v6Server) getLeasesRef() []*Lease {
+func (s *v6Server) getLeasesRef() []*dhcpsvc.Lease {
 	return s.leases
 }
 
@@ -171,7 +177,7 @@ func (s *v6Server) leaseRemoveSwapByIndex(i int) {
 
 // Remove a dynamic lease with the same properties
 // Return error if a static lease is found
-func (s *v6Server) rmDynamicLease(lease *Lease) (err error) {
+func (s *v6Server) rmDynamicLease(lease *dhcpsvc.Lease) (err error) {
 	for i := 0; i < len(s.leases); i++ {
 		l := s.leases[i]
 
@@ -201,7 +207,7 @@ func (s *v6Server) rmDynamicLease(lease *Lease) (err error) {
 }
 
 // AddStaticLease adds a static lease.  It is safe for concurrent use.
-func (s *v6Server) AddStaticLease(l *Lease) (err error) {
+func (s *v6Server) AddStaticLease(l *dhcpsvc.Lease) (err error) {
 	defer func() { err = errors.Annotate(err, "dhcpv6: %w") }()
 
 	if !l.IP.Is6() {
@@ -232,8 +238,39 @@ func (s *v6Server) AddStaticLease(l *Lease) (err error) {
 	return nil
 }
 
+// UpdateStaticLease updates IP, hostname of the static lease.
+func (s *v6Server) UpdateStaticLease(l *dhcpsvc.Lease) (err error) {
+	defer func() {
+		if err != nil {
+			err = errors.Annotate(err, "dhcpv6: updating static lease: %w")
+
+			return
+		}
+
+		s.conf.notify(LeaseChangedDBStore)
+		s.conf.notify(LeaseChangedRemovedStatic)
+	}()
+
+	s.leasesLock.Lock()
+	defer s.leasesLock.Unlock()
+
+	found := s.findLease(l.HWAddr)
+	if found == nil {
+		return fmt.Errorf("can't find lease %s", l.HWAddr)
+	}
+
+	err = s.rmLease(found)
+	if err != nil {
+		return fmt.Errorf("removing previous lease for %s (%s): %w", l.IP, l.HWAddr, err)
+	}
+
+	s.addLease(l)
+
+	return nil
+}
+
 // RemoveStaticLease removes a static lease.  It is safe for concurrent use.
-func (s *v6Server) RemoveStaticLease(l *Lease) (err error) {
+func (s *v6Server) RemoveStaticLease(l *dhcpsvc.Lease) (err error) {
 	defer func() { err = errors.Annotate(err, "dhcpv6: %w") }()
 
 	if !l.IP.Is6() {
@@ -258,7 +295,7 @@ func (s *v6Server) RemoveStaticLease(l *Lease) (err error) {
 }
 
 // Add a lease
-func (s *v6Server) addLease(l *Lease) {
+func (s *v6Server) addLease(l *dhcpsvc.Lease) {
 	s.leases = append(s.leases, l)
 	ip := l.IP.As16()
 	s.ipAddrs[ip[15]] = 1
@@ -266,7 +303,7 @@ func (s *v6Server) addLease(l *Lease) {
 }
 
 // Remove a lease with the same properties
-func (s *v6Server) rmLease(lease *Lease) (err error) {
+func (s *v6Server) rmLease(lease *dhcpsvc.Lease) (err error) {
 	for i, l := range s.leases {
 		if l.IP == lease.IP {
 			if !bytes.Equal(l.HWAddr, lease.HWAddr) ||
@@ -283,16 +320,14 @@ func (s *v6Server) rmLease(lease *Lease) (err error) {
 	return fmt.Errorf("lease not found")
 }
 
-// Find lease by MAC
-func (s *v6Server) findLease(mac net.HardwareAddr) *Lease {
-	s.leasesLock.Lock()
-	defer s.leasesLock.Unlock()
-
+// Find lease by MAC.
+func (s *v6Server) findLease(mac net.HardwareAddr) (lease *dhcpsvc.Lease) {
 	for i := range s.leases {
 		if bytes.Equal(mac, s.leases[i].HWAddr) {
 			return s.leases[i]
 		}
 	}
+
 	return nil
 }
 
@@ -324,8 +359,8 @@ func (s *v6Server) findFreeIP() net.IP {
 }
 
 // Reserve lease for MAC
-func (s *v6Server) reserveLease(mac net.HardwareAddr) *Lease {
-	l := Lease{
+func (s *v6Server) reserveLease(mac net.HardwareAddr) *dhcpsvc.Lease {
+	l := dhcpsvc.Lease{
 		HWAddr: make([]byte, len(mac)),
 	}
 
@@ -358,7 +393,7 @@ func (s *v6Server) reserveLease(mac net.HardwareAddr) *Lease {
 	return &l
 }
 
-func (s *v6Server) commitDynamicLease(l *Lease) {
+func (s *v6Server) commitDynamicLease(l *dhcpsvc.Lease) {
 	l.Expiry = time.Now().Add(s.conf.leaseTime)
 
 	s.leasesLock.Lock()
@@ -406,7 +441,7 @@ func (s *v6Server) checkSID(msg *dhcpv6.Message) error {
 }
 
 // . IAAddress must be equal to the lease's IP
-func (s *v6Server) checkIA(msg *dhcpv6.Message, lease *Lease) error {
+func (s *v6Server) checkIA(msg *dhcpv6.Message, lease *dhcpsvc.Lease) error {
 	switch msg.Type() {
 	case dhcpv6.MessageTypeRequest,
 		dhcpv6.MessageTypeConfirm,
@@ -432,7 +467,7 @@ func (s *v6Server) checkIA(msg *dhcpv6.Message, lease *Lease) error {
 }
 
 // Store lease in DB (if necessary) and return lease life time
-func (s *v6Server) commitLease(msg *dhcpv6.Message, lease *Lease) time.Duration {
+func (s *v6Server) commitLease(msg *dhcpv6.Message, lease *dhcpsvc.Lease) time.Duration {
 	lifetime := s.conf.leaseTime
 
 	switch msg.Type() {
@@ -474,7 +509,14 @@ func (s *v6Server) process(msg *dhcpv6.Message, req, resp dhcpv6.DHCPv6) bool {
 		return false
 	}
 
-	lease := s.findLease(mac)
+	var lease *dhcpsvc.Lease
+	func() {
+		s.leasesLock.Lock()
+		defer s.leasesLock.Unlock()
+
+		lease = s.findLease(mac)
+	}()
+
 	if lease == nil {
 		log.Debug("dhcpv6: no lease for: %s", mac)
 

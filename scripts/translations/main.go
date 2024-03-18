@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,7 +19,6 @@ import (
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 const (
@@ -30,7 +30,7 @@ const (
 	twoskyURI        = "https://twosky.int.agrd.dev/api/v1"
 
 	readLimit     = 1 * 1024 * 1024
-	uploadTimeout = 10 * time.Second
+	uploadTimeout = 20 * time.Second
 )
 
 // blockerLangCodes is the codes of languages which need to be fully translated.

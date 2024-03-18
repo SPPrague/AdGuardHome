@@ -26,7 +26,7 @@ func TestRewrites(t *testing.T) {
 		addr2v6 = netip.MustParseAddr("1234::5678")
 	)
 
-	d.Rewrites = []*LegacyRewrite{{
+	d.conf.Rewrites = []*LegacyRewrite{{
 		// This one and below are about CNAME, A and AAAA.
 		Domain: "somecname",
 		Answer: "somehost.com",
@@ -80,6 +80,12 @@ func TestRewrites(t *testing.T) {
 	}, {
 		Domain: "*.issue4016.com",
 		Answer: "sub.issue4016.com",
+	}, {
+		Domain: "*.sub.issue6226.com",
+		Answer: addr2v4.String(),
+	}, {
+		Domain: "*.issue6226.com",
+		Answer: addr1v4.String(),
 	}}
 
 	require.NoError(t, d.prepareRewrites())
@@ -182,6 +188,20 @@ func TestRewrites(t *testing.T) {
 		wantIPs:    nil,
 		wantReason: NotFilteredNotFound,
 		dtyp:       dns.TypeA,
+	}, {
+		name:       "issue6226",
+		host:       "www.issue6226.com",
+		wantCName:  "",
+		wantIPs:    []netip.Addr{addr1v4},
+		wantReason: Rewritten,
+		dtyp:       dns.TypeA,
+	}, {
+		name:       "issue6226_sub",
+		host:       "www.sub.issue6226.com",
+		wantCName:  "",
+		wantIPs:    []netip.Addr{addr2v4},
+		wantReason: Rewritten,
+		dtyp:       dns.TypeA,
 	}}
 
 	for _, tc := range testCases {
@@ -202,7 +222,7 @@ func TestRewritesLevels(t *testing.T) {
 	d, _ := newForTest(t, nil, nil)
 	t.Cleanup(d.Close)
 	// Exact host, wildcard L2, wildcard L3.
-	d.Rewrites = []*LegacyRewrite{{
+	d.conf.Rewrites = []*LegacyRewrite{{
 		Domain: "host.com",
 		Answer: "1.1.1.1",
 		Type:   dns.TypeA,
@@ -249,7 +269,7 @@ func TestRewritesExceptionCNAME(t *testing.T) {
 	d, _ := newForTest(t, nil, nil)
 	t.Cleanup(d.Close)
 	// Wildcard and exception for a sub-domain.
-	d.Rewrites = []*LegacyRewrite{{
+	d.conf.Rewrites = []*LegacyRewrite{{
 		Domain: "*.host.com",
 		Answer: "2.2.2.2",
 	}, {
@@ -300,7 +320,7 @@ func TestRewritesExceptionIP(t *testing.T) {
 	d, _ := newForTest(t, nil, nil)
 	t.Cleanup(d.Close)
 	// Exception for AAAA record.
-	d.Rewrites = []*LegacyRewrite{{
+	d.conf.Rewrites = []*LegacyRewrite{{
 		Domain: "host.com",
 		Answer: "1.2.3.4",
 		Type:   dns.TypeA,

@@ -12,38 +12,24 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghhttp"
-	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering/rulelist"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/hostsfile"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/mathutil"
-	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/AdguardTeam/golibs/stringutil"
+	"github.com/AdguardTeam/golibs/syncutil"
 	"github.com/AdguardTeam/urlfilter"
 	"github.com/AdguardTeam/urlfilter/filterlist"
 	"github.com/AdguardTeam/urlfilter/rules"
 	"github.com/miekg/dns"
-	"golang.org/x/exp/slices"
-)
-
-// The IDs of built-in filter lists.
-//
-// Keep in sync with client/src/helpers/constants.js.
-// TODO(d.kolyshev): Add RewritesListID and don't forget to keep in sync.
-const (
-	CustomListID = -iota
-	SysHostsListID
-	BlockedSvcsListID
-	ParentalListID
-	SafeBrowsingListID
-	SafeSearchListID
 )
 
 // ServiceEntry - blocked service array element
@@ -97,7 +83,9 @@ type Config struct {
 
 	// EtcHosts is a container of IP-hostname pairs taken from the operating
 	// system configuration files (e.g. /etc/hosts).
-	EtcHosts *aghnet.HostsContainer `yaml:"-"`
+	//
+	// TODO(e.burkov):  Move it to dnsforward entirely.
+	EtcHosts hostsfile.Storage `yaml:"-"`
 
 	// Called when the configuration is changed by HTTP request
 	ConfigModified func() `yaml:"-"`
@@ -232,22 +220,13 @@ type Checker interface {
 // DNSFilter matches hostnames and DNS requests against filtering rules.
 type DNSFilter struct {
 	// bufPool is a pool of buffers used for filtering-rule list parsing.
-	bufPool *sync.Pool
+	bufPool *syncutil.Pool[[]byte]
 
 	rulesStorage    *filterlist.RuleStorage
 	filteringEngine *urlfilter.DNSEngine
 
 	rulesStorageAllow    *filterlist.RuleStorage
 	filteringEngineAllow *urlfilter.DNSEngine
-
-	// Config contains filtering parameters.  For direct access by library
-	// users, even a = assignment.
-	//
-	// TODO(d.kolyshev): Remove this embed.
-	Config
-
-	// confLock protects Config.
-	confLock sync.RWMutex
 
 	safeSearch SafeSearch
 
@@ -258,6 +237,15 @@ type DNSFilter struct {
 	parentalControlChecker Checker
 
 	engineLock sync.RWMutex
+
+	// confMu protects conf.
+	confMu *sync.RWMutex
+
+	// conf contains filtering parameters.
+	conf *Config
+
+	// done is the channel to signal to stop running filters updates loop.
+	done chan struct{}
 
 	// Channel for passing data to filters-initializer goroutine
 	filtersInitializerChan chan filtersInitializerParams
@@ -358,38 +346,38 @@ func (r Reason) In(reasons ...Reason) (ok bool) { return slices.Contains(reasons
 
 // SetEnabled sets the status of the *DNSFilter.
 func (d *DNSFilter) SetEnabled(enabled bool) {
-	atomic.StoreUint32(&d.enabled, mathutil.BoolToNumber[uint32](enabled))
+	atomic.StoreUint32(&d.conf.enabled, mathutil.BoolToNumber[uint32](enabled))
 }
 
 // Settings returns filtering settings.
 func (d *DNSFilter) Settings() (s *Settings) {
-	d.confLock.RLock()
-	defer d.confLock.RUnlock()
+	d.confMu.RLock()
+	defer d.confMu.RUnlock()
 
 	return &Settings{
-		FilteringEnabled:    atomic.LoadUint32(&d.Config.enabled) != 0,
-		SafeSearchEnabled:   d.Config.SafeSearchConf.Enabled,
-		SafeBrowsingEnabled: d.Config.SafeBrowsingEnabled,
-		ParentalEnabled:     d.Config.ParentalEnabled,
+		FilteringEnabled:    atomic.LoadUint32(&d.conf.enabled) != 0,
+		SafeSearchEnabled:   d.conf.SafeSearchConf.Enabled,
+		SafeBrowsingEnabled: d.conf.SafeBrowsingEnabled,
+		ParentalEnabled:     d.conf.ParentalEnabled,
 	}
 }
 
 // WriteDiskConfig - write configuration
 func (d *DNSFilter) WriteDiskConfig(c *Config) {
 	func() {
-		d.confLock.Lock()
-		defer d.confLock.Unlock()
+		d.confMu.Lock()
+		defer d.confMu.Unlock()
 
-		*c = d.Config
+		*c = *d.conf
 		c.Rewrites = cloneRewrites(c.Rewrites)
 	}()
 
-	d.filtersMu.RLock()
-	defer d.filtersMu.RUnlock()
+	d.conf.filtersMu.RLock()
+	defer d.conf.filtersMu.RUnlock()
 
-	c.Filters = slices.Clone(d.Filters)
-	c.WhitelistFilters = slices.Clone(d.WhitelistFilters)
-	c.UserRules = slices.Clone(d.UserRules)
+	c.Filters = slices.Clone(d.conf.Filters)
+	c.WhitelistFilters = slices.Clone(d.conf.WhitelistFilters)
+	c.UserRules = slices.Clone(d.conf.UserRules)
 }
 
 // setFilters sets new filters, synchronously or asynchronously.  When filters
@@ -426,23 +414,14 @@ func (d *DNSFilter) setFilters(blockFilters, allowFilters []Filter, async bool) 
 	return d.initFiltering(allowFilters, blockFilters)
 }
 
-// Starts initializing new filters by signal from channel
-func (d *DNSFilter) filtersInitializer() {
-	for {
-		params := <-d.filtersInitializerChan
-		err := d.initFiltering(params.allowFilters, params.blockFilters)
-		if err != nil {
-			log.Error("filtering: initializing: %s", err)
-
-			continue
-		}
-	}
-}
-
 // Close - close the object
 func (d *DNSFilter) Close() {
 	d.engineLock.Lock()
 	defer d.engineLock.Unlock()
+
+	if d.done != nil {
+		d.done <- struct{}{}
+	}
 
 	d.reset()
 }
@@ -459,6 +438,79 @@ func (d *DNSFilter) reset() {
 			log.Error("filtering: rulesStorageAllow.Close: %s", err)
 		}
 	}
+}
+
+// ProtectionStatus returns the status of protection and time until it's
+// disabled if so.
+func (d *DNSFilter) ProtectionStatus() (status bool, disabledUntil *time.Time) {
+	d.confMu.RLock()
+	defer d.confMu.RUnlock()
+
+	return d.conf.ProtectionEnabled, d.conf.ProtectionDisabledUntil
+}
+
+// SetProtectionStatus updates the status of protection and time until it's
+// disabled.
+func (d *DNSFilter) SetProtectionStatus(status bool, disabledUntil *time.Time) {
+	d.confMu.Lock()
+	defer d.confMu.Unlock()
+
+	d.conf.ProtectionEnabled = status
+	d.conf.ProtectionDisabledUntil = disabledUntil
+}
+
+// SetProtectionEnabled updates the status of protection.
+func (d *DNSFilter) SetProtectionEnabled(status bool) {
+	d.confMu.Lock()
+	defer d.confMu.Unlock()
+
+	d.conf.ProtectionEnabled = status
+}
+
+// SetBlockingMode sets blocking mode properties.
+func (d *DNSFilter) SetBlockingMode(mode BlockingMode, bIPv4, bIPv6 netip.Addr) {
+	d.confMu.Lock()
+	defer d.confMu.Unlock()
+
+	d.conf.BlockingMode = mode
+	if mode == BlockingModeCustomIP {
+		d.conf.BlockingIPv4 = bIPv4
+		d.conf.BlockingIPv6 = bIPv6
+	}
+}
+
+// BlockingMode returns blocking mode properties.
+func (d *DNSFilter) BlockingMode() (mode BlockingMode, bIPv4, bIPv6 netip.Addr) {
+	d.confMu.RLock()
+	defer d.confMu.RUnlock()
+
+	return d.conf.BlockingMode, d.conf.BlockingIPv4, d.conf.BlockingIPv6
+}
+
+// SetBlockedResponseTTL sets TTL for blocked responses.
+func (d *DNSFilter) SetBlockedResponseTTL(ttl uint32) {
+	d.confMu.Lock()
+	defer d.confMu.Unlock()
+
+	d.conf.BlockedResponseTTL = ttl
+}
+
+// BlockedResponseTTL returns TTL for blocked responses.
+func (d *DNSFilter) BlockedResponseTTL() (ttl uint32) {
+	d.confMu.Lock()
+	defer d.confMu.Unlock()
+
+	return d.conf.BlockedResponseTTL
+}
+
+// SafeBrowsingBlockHost returns a host for safe browsing blocked responses.
+func (d *DNSFilter) SafeBrowsingBlockHost() (host string) {
+	return d.conf.SafeBrowsingBlockHost
+}
+
+// ParentalBlockHost returns a host for parental protection blocked responses.
+func (d *DNSFilter) ParentalBlockHost() (host string) {
+	return d.conf.ParentalBlockHost
 }
 
 // ResultRule contains information about applied rules.
@@ -552,62 +604,6 @@ func (d *DNSFilter) CheckHost(
 	return Result{}, nil
 }
 
-// matchSysHosts tries to match the host against the operating system's hosts
-// database.  err is always nil.
-func (d *DNSFilter) matchSysHosts(
-	host string,
-	qtype uint16,
-	setts *Settings,
-) (res Result, err error) {
-	// TODO(e.burkov):  Where else is this checked?
-	if !setts.FilteringEnabled || d.EtcHosts == nil {
-		return res, nil
-	}
-
-	var recs []*hostsfile.Record
-	switch qtype {
-	case dns.TypeA, dns.TypeAAAA:
-		recs = d.EtcHosts.MatchName(host)
-	case dns.TypePTR:
-		var ip net.IP
-		ip, err = netutil.IPFromReversedAddr(host)
-		if err != nil {
-			log.Debug("filtering: failed to parse PTR record %q: %s", host, err)
-
-			return res, nil
-		}
-
-		addr, _ := netip.AddrFromSlice(ip)
-		recs = d.EtcHosts.MatchAddr(addr)
-	default:
-		log.Debug("filtering: unsupported query type %s", dns.Type(qtype))
-	}
-
-	var vals []rules.RRValue
-	var resRules []*ResultRule
-	resRulesLen := 0
-	for _, rec := range recs {
-		vals, resRules = appendRewriteResultFromHost(vals, resRules, rec, qtype)
-		if len(resRules) > resRulesLen {
-			resRulesLen = len(resRules)
-			log.Debug("filtering: matched %s in %q", host, rec.Source)
-		}
-	}
-
-	if len(vals) > 0 {
-		res.DNSRewriteResult = &DNSRewriteResult{
-			Response: DNSRewriteResultResponse{
-				qtype: vals,
-			},
-			RCode: dns.RcodeSuccess,
-		}
-		res.Rules = resRules
-		res.Reason = RewrittenRule
-	}
-
-	return res, nil
-}
-
 // processRewrites performs filtering based on the legacy rewrite records.
 //
 // Firstly, it finds CNAME rewrites for host.  If the CNAME is the same as host,
@@ -618,10 +614,10 @@ func (d *DNSFilter) matchSysHosts(
 // accordingly.  If the found rewrite has a special value of "A" or "AAAA", the
 // result is an exception.
 func (d *DNSFilter) processRewrites(host string, qtype uint16) (res Result) {
-	d.confLock.RLock()
-	defer d.confLock.RUnlock()
+	d.confMu.RLock()
+	defer d.confMu.RUnlock()
 
-	rewrites, matched := findRewrites(d.Rewrites, host, qtype)
+	rewrites, matched := findRewrites(d.conf.Rewrites, host, qtype)
 	if !matched {
 		return Result{}
 	}
@@ -661,7 +657,7 @@ func (d *DNSFilter) processRewrites(host string, qtype uint16) (res Result) {
 
 		cnames.Add(host)
 		res.CanonName = host
-		rewrites, matched = findRewrites(d.Rewrites, host, qtype)
+		rewrites, matched = findRewrites(d.conf.Rewrites, host, qtype)
 	}
 
 	setRewriteResult(&res, host, rewrites, qtype)
@@ -982,16 +978,11 @@ func InitModule() {
 // be non-nil.
 func New(c *Config, blockFilters []Filter) (d *DNSFilter, err error) {
 	d = &DNSFilter{
-		bufPool: &sync.Pool{
-			New: func() (buf any) {
-				bufVal := make([]byte, rulelist.DefaultRuleBufSize)
-
-				return &bufVal
-			},
-		},
+		bufPool:                syncutil.NewSlicePool[byte](rulelist.DefaultRuleBufSize),
 		refreshLock:            &sync.Mutex{},
 		safeBrowsingChecker:    c.SafeBrowsingChecker,
 		parentalControlChecker: c.ParentalControlChecker,
+		confMu:                 &sync.RWMutex{},
 	}
 
 	d.safeSearch = c.SafeSearch
@@ -1018,16 +1009,16 @@ func New(c *Config, blockFilters []Filter) (d *DNSFilter, err error) {
 
 	defer func() { err = errors.Annotate(err, "filtering: %w") }()
 
-	d.Config = *c
-	d.filtersMu = &sync.RWMutex{}
+	d.conf = c
+	d.conf.filtersMu = &sync.RWMutex{}
 
 	err = d.prepareRewrites()
 	if err != nil {
 		return nil, fmt.Errorf("rewrites: preparing: %s", err)
 	}
 
-	if d.BlockedServices != nil {
-		err = d.BlockedServices.Validate()
+	if d.conf.BlockedServices != nil {
+		err = d.conf.BlockedServices.Validate()
 		if err != nil {
 			return nil, fmt.Errorf("filtering: %w", err)
 		}
@@ -1042,33 +1033,77 @@ func New(c *Config, blockFilters []Filter) (d *DNSFilter, err error) {
 		}
 	}
 
-	_ = os.MkdirAll(filepath.Join(d.DataDir, filterDir), 0o755)
+	_ = os.MkdirAll(filepath.Join(d.conf.DataDir, filterDir), 0o755)
 
-	d.loadFilters(d.Filters)
-	d.loadFilters(d.WhitelistFilters)
+	d.loadFilters(d.conf.Filters)
+	d.loadFilters(d.conf.WhitelistFilters)
 
-	d.Filters = deduplicateFilters(d.Filters)
-	d.WhitelistFilters = deduplicateFilters(d.WhitelistFilters)
+	d.conf.Filters = deduplicateFilters(d.conf.Filters)
+	d.conf.WhitelistFilters = deduplicateFilters(d.conf.WhitelistFilters)
 
-	updateUniqueFilterID(d.Filters)
-	updateUniqueFilterID(d.WhitelistFilters)
+	updateUniqueFilterID(d.conf.Filters)
+	updateUniqueFilterID(d.conf.WhitelistFilters)
 
 	return d, nil
 }
 
-// Start - start the module:
-// . start async filtering initializer goroutine
-// . register web handlers
+// Start registers web handlers and starts filters updates loop.
 func (d *DNSFilter) Start() {
 	d.filtersInitializerChan = make(chan filtersInitializerParams, 1)
-	go d.filtersInitializer()
+	d.done = make(chan struct{}, 1)
 
 	d.RegisterFilteringHandlers()
 
-	// Here we should start updating filters,
-	//  but currently we can't wake up the periodic task to do so.
-	// So for now we just start this periodic task from here.
-	go d.periodicallyRefreshFilters()
+	go d.updatesLoop()
+}
+
+// updatesLoop initializes new filters and checks for filters updates in a loop.
+func (d *DNSFilter) updatesLoop() {
+	defer log.OnPanic("filtering: updates loop")
+
+	ivl := time.Second * 5
+	t := time.NewTimer(ivl)
+
+	for {
+		select {
+		case params := <-d.filtersInitializerChan:
+			err := d.initFiltering(params.allowFilters, params.blockFilters)
+			if err != nil {
+				log.Error("filtering: initializing: %s", err)
+
+				continue
+			}
+		case <-t.C:
+			ivl = d.periodicallyRefreshFilters(ivl)
+			t.Reset(ivl)
+		case <-d.done:
+			t.Stop()
+
+			return
+		}
+	}
+}
+
+// periodicallyRefreshFilters checks for filters updates and returns time
+// interval for the next update.
+func (d *DNSFilter) periodicallyRefreshFilters(ivl time.Duration) (nextIvl time.Duration) {
+	const maxInterval = time.Hour
+
+	if d.conf.FiltersUpdateIntervalHours == 0 {
+		return ivl
+	}
+
+	isNetErr, ok := false, false
+	_, isNetErr, ok = d.tryRefreshFilters(true, true, false)
+
+	if ok && !isNetErr {
+		ivl = maxInterval
+	} else if isNetErr {
+		ivl *= 2
+		ivl = max(ivl, maxInterval)
+	}
+
+	return ivl
 }
 
 // Safe browsing and parental control methods.
@@ -1091,7 +1126,7 @@ func (d *DNSFilter) checkSafeBrowsing(
 	res = Result{
 		Rules: []*ResultRule{{
 			Text:         "adguard-malware-shavar",
-			FilterListID: SafeBrowsingListID,
+			FilterListID: rulelist.URLFilterIDSafeBrowsing,
 		}},
 		Reason:     FilteredSafeBrowsing,
 		IsFiltered: true,
@@ -1123,7 +1158,7 @@ func (d *DNSFilter) checkParental(
 	res = Result{
 		Rules: []*ResultRule{{
 			Text:         "parental CATEGORY_BLACKLISTED",
-			FilterListID: ParentalListID,
+			FilterListID: rulelist.URLFilterIDParentalControl,
 		}},
 		Reason:     FilteredParental,
 		IsFiltered: true,

@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/aghalg"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghhttp"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/golibs/errors"
-	"github.com/AdguardTeam/golibs/stringutil"
 	"github.com/miekg/dns"
 )
 
@@ -36,8 +36,9 @@ type QueryLog interface {
 //
 // Do not alter any fields of this structure after using it.
 type Config struct {
-	// Ignored is the list of host names, which should not be written to log.
-	Ignored *stringutil.Set
+	// Ignored contains the list of host names, which should not be written to
+	// log, and matches them.
+	Ignored *aghnet.IgnoreEngine
 
 	// Anonymizer processes the IP addresses to anonymize those if needed.
 	Anonymizer *aghnet.IPMut
@@ -62,7 +63,7 @@ type Config struct {
 
 	// MemSize is the number of entries kept in a memory buffer before they are
 	// flushed to disk.
-	MemSize uint32
+	MemSize uint
 
 	// Enabled tells if the query log is enabled.
 	Enabled bool
@@ -142,8 +143,17 @@ func newQueryLog(conf Config) (l *queryLog, err error) {
 		}
 	}
 
+	memSize := conf.MemSize
+	if memSize == 0 {
+		// If query log is enabled, we still need to write entries to a file.
+		// And all writing goes through a buffer.
+		memSize = 1
+	}
+
 	l = &queryLog{
 		findClient: findClient,
+
+		buffer: aghalg.NewRingBuffer[*logEntry](memSize),
 
 		conf:    &Config{},
 		confMu:  &sync.RWMutex{},

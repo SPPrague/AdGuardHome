@@ -36,11 +36,8 @@ type dnsContext struct {
 
 	// unreversedReqIP stores an IP address obtained from a PTR request if it
 	// was parsed successfully and belongs to one of the locally served IP
-	// ranges.  It is also filled with unmapped version of the address if it's
-	// within DNS64 prefixes.
-	//
-	// TODO(e.burkov):  Use netip.Addr when we switch to netip more fully.
-	unreversedReqIP net.IP
+	// ranges.
+	unreversedReqIP netip.Addr
 
 	// err is the error returned from a processing function.
 	err error
@@ -191,7 +188,7 @@ func (s *Server) processInitial(dctx *dnsContext) (rc resultCode) {
 	defer log.Debug("dnsforward: finished processing initial")
 
 	pctx := dctx.proxyCtx
-	s.processClientIP(pctx.Addr)
+	s.processClientIP(pctx.Addr.Addr())
 
 	q := pctx.Req.Question[0]
 	qt := q.Qtype
@@ -228,9 +225,8 @@ func (s *Server) processInitial(dctx *dnsContext) (rc resultCode) {
 }
 
 // processClientIP sends the client IP address to s.addrProc, if needed.
-func (s *Server) processClientIP(addr net.Addr) {
-	clientIP := netutil.NetAddrToAddrPort(addr).Addr()
-	if clientIP == (netip.Addr{}) {
+func (s *Server) processClientIP(addr netip.Addr) {
+	if !addr.IsValid() {
 		log.Info("dnsforward: warning: bad client addr %q", addr)
 
 		return
@@ -241,7 +237,7 @@ func (s *Server) processClientIP(addr net.Addr) {
 	s.serverLock.RLock()
 	defer s.serverLock.RUnlock()
 
-	s.addrProc.Process(clientIP)
+	s.addrProc.Process(addr)
 }
 
 // processDDRQuery responds to Discovery of Designated Resolvers (DDR) SVCB
@@ -351,12 +347,7 @@ func (s *Server) processDetermineLocal(dctx *dnsContext) (rc resultCode) {
 
 	rc = resultCodeSuccess
 
-	var ip net.IP
-	if ip, _ = netutil.IPAndPortFromAddr(dctx.proxyCtx.Addr); ip == nil {
-		return rc
-	}
-
-	dctx.isLocalClient = s.privateNets.Contains(ip)
+	dctx.isLocalClient = s.privateNets.Contains(dctx.proxyCtx.Addr.Addr())
 
 	return rc
 }
@@ -497,14 +488,7 @@ func extractARPASubnet(domain string) (pref netip.Prefix, err error) {
 		}
 	}
 
-	var subnet *net.IPNet
-	subnet, err = netutil.SubnetFromReversedAddr(domain[idx:])
-	if err != nil {
-		// Don't wrap the error since it's informative enough as is.
-		return netip.Prefix{}, err
-	}
-
-	return netutil.IPNetToPrefixNoMapped(subnet)
+	return netutil.PrefixFromReversedAddr(domain[idx:])
 }
 
 // processRestrictLocal responds with NXDOMAIN to PTR requests for IP addresses
@@ -538,8 +522,7 @@ func (s *Server) processRestrictLocal(dctx *dnsContext) (rc resultCode) {
 	// assume that all the DHCP leases we give are locally served or at least
 	// shouldn't be accessible externally.
 	subnetAddr := subnet.Addr()
-	addrData := subnetAddr.AsSlice()
-	if !s.privateNets.Contains(addrData) {
+	if !s.privateNets.Contains(subnetAddr) {
 		return resultCodeSuccess
 	}
 
@@ -554,7 +537,7 @@ func (s *Server) processRestrictLocal(dctx *dnsContext) (rc resultCode) {
 	}
 
 	// Do not perform unreversing ever again.
-	dctx.unreversedReqIP = addrData
+	dctx.unreversedReqIP = subnetAddr
 
 	// There is no need to filter request from external addresses since this
 	// code is only executed when the request is for locally served ARPA
@@ -579,16 +562,8 @@ func (s *Server) processDHCPAddrs(dctx *dnsContext) (rc resultCode) {
 		return resultCodeSuccess
 	}
 
-	ip := dctx.unreversedReqIP
-	if ip == nil {
-		return resultCodeSuccess
-	}
-
-	// TODO(a.garipov):  Remove once we switch to [netip.Addr] more fully.
-	ipAddr, err := netutil.IPToAddrNoMapped(ip)
-	if err != nil {
-		log.Debug("dnsforward: bad reverse ip %v from dhcp: %s", ip, err)
-
+	ipAddr := dctx.unreversedReqIP
+	if ipAddr == (netip.Addr{}) {
 		return resultCodeSuccess
 	}
 
@@ -597,7 +572,7 @@ func (s *Server) processDHCPAddrs(dctx *dnsContext) (rc resultCode) {
 		return resultCodeSuccess
 	}
 
-	log.Debug("dnsforward: dhcp client %s is %q", ip, host)
+	log.Debug("dnsforward: dhcp client %s is %q", ipAddr, host)
 
 	req := pctx.Req
 	resp := s.makeResponse(req)
@@ -607,7 +582,7 @@ func (s *Server) processDHCPAddrs(dctx *dnsContext) (rc resultCode) {
 			Rrtype: dns.TypePTR,
 			// TODO(e.burkov):  Use [dhcpsvc.Lease.Expiry].  See
 			// https://github.com/AdguardTeam/AdGuardHome/issues/3932.
-			Ttl:   s.dnsFilter.BlockedResponseTTL,
+			Ttl:   s.dnsFilter.BlockedResponseTTL(),
 			Class: dns.ClassINET,
 		},
 		Ptr: dns.Fqdn(strings.Join([]string{host, s.localDomainSuffix}, ".")),
@@ -630,7 +605,7 @@ func (s *Server) processLocalPTR(dctx *dnsContext) (rc resultCode) {
 	}
 
 	ip := dctx.unreversedReqIP
-	if ip == nil {
+	if ip == (netip.Addr{}) {
 		return resultCodeSuccess
 	}
 
@@ -645,8 +620,7 @@ func (s *Server) processLocalPTR(dctx *dnsContext) (rc resultCode) {
 			// Generate the server failure if the private upstream configuration
 			// is empty.
 			//
-			// TODO(e.burkov):  Get rid of this crutch once the local resolvers
-			// logic is moved to the dnsproxy completely.
+			// This is a crutch, see TODO at [Server.localResolvers].
 			if errors.Is(err, upstream.ErrNoUpstreams) {
 				pctx.Res = s.genServerFailure(pctx.Req)
 
@@ -671,11 +645,11 @@ func (s *Server) processLocalPTR(dctx *dnsContext) (rc resultCode) {
 }
 
 // Apply filtering logic
-func (s *Server) processFilteringBeforeRequest(ctx *dnsContext) (rc resultCode) {
+func (s *Server) processFilteringBeforeRequest(dctx *dnsContext) (rc resultCode) {
 	log.Debug("dnsforward: started processing filtering before req")
 	defer log.Debug("dnsforward: finished processing filtering before req")
 
-	if ctx.proxyCtx.Res != nil {
+	if dctx.proxyCtx.Res != nil {
 		// Go on since the response is already set.
 		return resultCodeSuccess
 	}
@@ -684,8 +658,8 @@ func (s *Server) processFilteringBeforeRequest(ctx *dnsContext) (rc resultCode) 
 	defer s.serverLock.RUnlock()
 
 	var err error
-	if ctx.result, err = s.filterDNSRequest(ctx); err != nil {
-		ctx.err = err
+	if dctx.result, err = s.filterDNSRequest(dctx); err != nil {
+		dctx.err = err
 
 		return resultCodeError
 	}
@@ -831,14 +805,13 @@ func (s *Server) dhcpHostFromRequest(q *dns.Question) (reqHost string) {
 
 // setCustomUpstream sets custom upstream settings in pctx, if necessary.
 func (s *Server) setCustomUpstream(pctx *proxy.DNSContext, clientID string) {
-	customUpsByClient := s.conf.GetCustomUpstreamByClient
-	if pctx.Addr == nil || customUpsByClient == nil {
+	if !pctx.Addr.IsValid() || s.conf.ClientsContainer == nil {
 		return
 	}
 
 	// Use the ClientID first, since it has a higher priority.
-	id := stringutil.Coalesce(clientID, ipStringFromAddr(pctx.Addr))
-	upsConf, err := customUpsByClient(id)
+	id := stringutil.Coalesce(clientID, pctx.Addr.Addr().String())
+	upsConf, err := s.conf.ClientsContainer.UpstreamConfigByID(id, s.bootstrap)
 	if err != nil {
 		log.Error("dnsforward: getting custom upstreams for client %s: %s", id, err)
 
@@ -847,9 +820,9 @@ func (s *Server) setCustomUpstream(pctx *proxy.DNSContext, clientID string) {
 
 	if upsConf != nil {
 		log.Debug("dnsforward: using custom upstreams for client %s", id)
-	}
 
-	pctx.CustomUpstreamConfig = upsConf
+		pctx.CustomUpstreamConfig = upsConf
+	}
 }
 
 // Apply filtering logic after we have received response from upstream servers
@@ -857,7 +830,6 @@ func (s *Server) processFilteringAfterResponse(dctx *dnsContext) (rc resultCode)
 	log.Debug("dnsforward: started processing filtering after resp")
 	defer log.Debug("dnsforward: finished processing filtering after resp")
 
-	pctx := dctx.proxyCtx
 	switch res := dctx.result; res.Reason {
 	case filtering.NotFilteredAllowList:
 		return resultCodeSuccess
@@ -871,6 +843,7 @@ func (s *Server) processFilteringAfterResponse(dctx *dnsContext) (rc resultCode)
 			return resultCodeSuccess
 		}
 
+		pctx := dctx.proxyCtx
 		pctx.Req.Question[0], pctx.Res.Question[0] = dctx.origQuestion, dctx.origQuestion
 		if len(pctx.Res.Answer) > 0 {
 			rr := s.genAnswerCNAME(pctx.Req, res.CanonName)
@@ -880,13 +853,13 @@ func (s *Server) processFilteringAfterResponse(dctx *dnsContext) (rc resultCode)
 
 		return resultCodeSuccess
 	default:
-		return s.filterAfterResponse(dctx, pctx)
+		return s.filterAfterResponse(dctx)
 	}
 }
 
 // filterAfterResponse returns the result of filtering the response that wasn't
 // explicitly allowed or rewritten.
-func (s *Server) filterAfterResponse(dctx *dnsContext, pctx *proxy.DNSContext) (res resultCode) {
+func (s *Server) filterAfterResponse(dctx *dnsContext) (res resultCode) {
 	// Check the response only if it's from an upstream.  Don't check the
 	// response if the protection is disabled since dnsrewrite rules aren't
 	// applied to it anyway.
@@ -894,16 +867,11 @@ func (s *Server) filterAfterResponse(dctx *dnsContext, pctx *proxy.DNSContext) (
 		return resultCodeSuccess
 	}
 
-	result, err := s.filterDNSResponse(pctx, dctx.setts)
+	err := s.filterDNSResponse(dctx)
 	if err != nil {
 		dctx.err = err
 
 		return resultCodeError
-	}
-
-	if result != nil {
-		dctx.result = result
-		dctx.origResp = pctx.Res
 	}
 
 	return resultCodeSuccess

@@ -12,7 +12,7 @@ import {
     toNumber,
 } from '../../../helpers/form';
 import {
-    validateServerName, validateIsSafePort, validatePort, validatePortQuic, validatePortTLS,
+    validateServerName, validateIsSafePort, validatePort, validatePortQuic, validatePortTLS, validatePlainDns,
 } from '../../../helpers/validators';
 import i18n from '../../../i18n';
 import KeyStatus from './KeyStatus';
@@ -34,7 +34,7 @@ const validate = (values) => {
     return errors;
 };
 
-const clearFields = (change, setTlsConfig, t) => {
+const clearFields = (change, setTlsConfig, validateTlsConfig, t) => {
     const fields = {
         private_key: '',
         certificate_chain: '',
@@ -47,12 +47,14 @@ const clearFields = (change, setTlsConfig, t) => {
         force_https: false,
         enabled: false,
         private_key_saved: false,
+        serve_plain_dns: true,
     };
     // eslint-disable-next-line no-alert
     if (window.confirm(t('encryption_reset'))) {
         Object.keys(fields)
             .forEach((field) => change(field, fields[field]));
         setTlsConfig(fields);
+        validateTlsConfig(fields);
     }
 };
 
@@ -82,6 +84,7 @@ let Form = (props) => {
         handleSubmit,
         handleChange,
         isEnabled,
+        servePlainDns,
         certificateChain,
         privateKey,
         certificatePath,
@@ -102,26 +105,30 @@ let Form = (props) => {
         subject,
         warning_validation,
         setTlsConfig,
+        validateTlsConfig,
         certificateSource,
         privateKeySource,
         privateKeySaved,
     } = props;
 
-    const isSavingDisabled = invalid
-        || submitting
-        || processingConfig
-        || processingValidate
-        || !valid_key
-        || !valid_cert
-        || !valid_pair;
+    const isSavingDisabled = () => {
+        const processing = submitting || processingConfig || processingValidate;
 
+        if (servePlainDns && !isEnabled) {
+            return invalid || processing;
+        }
+
+        return invalid || processing || !valid_key || !valid_cert || !valid_pair;
+    };
+
+    const isDisabled = isSavingDisabled();
     const isWarning = valid_key && valid_cert && valid_pair;
 
     return (
         <form onSubmit={handleSubmit}>
             <div className="row">
                 <div className="col-12">
-                    <div className="form__group form__group--settings">
+                    <div className="form__group form__group--settings mb-3">
                         <Field
                             name="enabled"
                             type="checkbox"
@@ -132,6 +139,19 @@ let Form = (props) => {
                     </div>
                     <div className="form__desc">
                         <Trans>encryption_enable_desc</Trans>
+                    </div>
+                    <div className="form__group mb-3 mt-5">
+                        <Field
+                            name="serve_plain_dns"
+                            type="checkbox"
+                            component={CheckboxField}
+                            placeholder={t('encryption_plain_dns_enable')}
+                            onChange={handleChange}
+                            validate={validatePlainDns}
+                        />
+                    </div>
+                    <div className="form__desc">
+                        <Trans>encryption_plain_dns_desc</Trans>
                     </div>
                     <hr />
                 </div>
@@ -225,16 +245,16 @@ let Form = (props) => {
                             <Trans>encryption_doq</Trans>
                         </label>
                         <Field
-                                id="port_dns_over_quic"
-                                name="port_dns_over_quic"
-                                component={renderInputField}
-                                type="number"
-                                className="form-control"
-                                placeholder={t('encryption_doq')}
-                                validate={[validatePortQuic]}
-                                normalize={toNumber}
-                                onChange={handleChange}
-                                disabled={!isEnabled}
+                            id="port_dns_over_quic"
+                            name="port_dns_over_quic"
+                            component={renderInputField}
+                            type="number"
+                            className="form-control"
+                            placeholder={t('encryption_doq')}
+                            validate={[validatePortQuic]}
+                            normalize={toNumber}
+                            onChange={handleChange}
+                            disabled={!isEnabled}
                         />
                         <div className="form__desc">
                             <Trans>encryption_doq_desc</Trans>
@@ -410,8 +430,8 @@ let Form = (props) => {
             <div className="btn-list mt-2">
                 <button
                     type="submit"
+                    disabled={isDisabled}
                     className="btn btn-success btn-standart"
-                    disabled={isSavingDisabled}
                 >
                     <Trans>save_config</Trans>
                 </button>
@@ -419,7 +439,7 @@ let Form = (props) => {
                     type="button"
                     className="btn btn-secondary btn-standart"
                     disabled={submitting || processingConfig}
-                    onClick={() => clearFields(change, setTlsConfig, t)}
+                    onClick={() => clearFields(change, setTlsConfig, validateTlsConfig, t)}
                 >
                     <Trans>reset_settings</Trans>
                 </button>
@@ -432,6 +452,7 @@ Form.propTypes = {
     handleSubmit: PropTypes.func.isRequired,
     handleChange: PropTypes.func,
     isEnabled: PropTypes.bool.isRequired,
+    servePlainDns: PropTypes.bool.isRequired,
     certificateChain: PropTypes.string.isRequired,
     privateKey: PropTypes.string.isRequired,
     certificatePath: PropTypes.string.isRequired,
@@ -455,6 +476,7 @@ Form.propTypes = {
     subject: PropTypes.string,
     t: PropTypes.func.isRequired,
     setTlsConfig: PropTypes.func.isRequired,
+    validateTlsConfig: PropTypes.func.isRequired,
     certificateSource: PropTypes.string,
     privateKeySource: PropTypes.string,
     privateKeySaved: PropTypes.bool,
@@ -464,6 +486,7 @@ const selector = formValueSelector(FORM_NAME.ENCRYPTION);
 
 Form = connect((state) => {
     const isEnabled = selector(state, 'enabled');
+    const servePlainDns = selector(state, 'serve_plain_dns');
     const certificateChain = selector(state, 'certificate_chain');
     const privateKey = selector(state, 'private_key');
     const certificatePath = selector(state, 'certificate_path');
@@ -473,6 +496,7 @@ Form = connect((state) => {
     const privateKeySaved = selector(state, 'private_key_saved');
     return {
         isEnabled,
+        servePlainDns,
         certificateChain,
         privateKey,
         certificatePath,

@@ -4,7 +4,76 @@
 
 ## v0.108.0: API changes
 
+## v0.107.44: API changes
+
+### The field `"upstream_mode"` in `DNSConfig`
+
+* The field `"upstream_mode"` in `POST /control/dns_config` and
+  `GET /control/dns_info` now accepts `load_balance` value. Note that, the usage
+  of an empty string or field absence is considered to as deprecated and is not
+  recommended. Use `load_balance` instead.
+
+### Type correction in `Client`
+
+* Field `upstreams_cache_size` of object `Client` now correctly has type
+  `integer` instead of the previous incorrect type `boolean`.
+
+## v0.107.42: API changes
+
+### The new field `"serve_plain_dns"` in `TlsConfig`
+
+* The new field `"serve_plain_dns"` in `POST /control/tls/configure`,
+  `POST /control/tls/validate` and `GET /control/tls/status` is true if plain
+  DNS is allowed for incoming requests.
+
+### The new fields `"upstreams_cache_enabled"` and `"upstreams_cache_size"` in `Client` object
+
+* The new field `"upstreams_cache_enabled"` in `GET /control/clients`,
+  `GET /control/clients/find`, `POST /control/clients/add`, and
+  `POST /control/clients/update` methods shows if client's DNS cache is enabled
+  for the client.  If not set AdGuard Home will use default value (false).
+
+* The new field `"upstreams_cache_size"` in `GET /control/clients`,
+  `GET /control/clients/find`, `POST /control/clients/add`, and
+  `POST /control/clients/update` methods is the size of client's DNS cache in
+  bytes.
+
+### The new field `"ratelimit_subnet_len_ipv4"` in `DNSConfig` object
+
+* The new field `"ratelimit_subnet_len_ipv4"` in `GET /control/dns_info` and
+  `POST /control/dns_config` is the length of the subnet mask for IPv4
+  addresses.
+
+### The new field `"ratelimit_subnet_len_ipv6"` in `DNSConfig` object
+
+* The new field `"ratelimit_subnet_len_ipv6"` in `GET /control/dns_info` and
+  `POST /control/dns_config` is the length of the subnet mask for IPv6
+  addresses.
+
+### The new field `"ratelimit_whitelist"` in `DNSConfig` object
+
+* The new field `"blocked_response_ttl"` in `GET /control/dns_info` and `POST
+  /control/dns_config` is the list of IP addresses excluded from rate limiting.
+
+## v0.107.39: API changes
+
+### New HTTP API 'POST /control/dhcp/update_static_lease'
+
+* The new `POST /control/dhcp/update_static_lease` HTTP API allows modifying IP
+  address, hostname of the static DHCP lease.  IP version must be the same as
+  previous.
+
+### The new field `"blocked_response_ttl"` in `DNSConfig` object
+
+* The new field `"blocked_response_ttl"` in `GET /control/dns_info` and `POST
+  /control/dns_config` is the TTL for blocked responses.
+
 ## v0.107.37: API changes
+
+### The new field `"fallback_dns"` in `UpstreamsConfig` object
+
+* The new field `"fallback_dns"` in `POST /control/test_upstream_dns` is the
+  list of fallback DNS servers to test.
 
 ### The new field `"fallback_dns"` in `DNSConfig` object
 
@@ -97,7 +166,7 @@ has the following format:
 * The new field `"top_upstreams_responses"` in `GET /control/stats` method
   shows the total number of responses from each upstream.
 
-* The new field `"top_upstrems_avg_time"` in `GET /control/stats` method shows
+* The new field `"top_upstreams_avg_time"` in `GET /control/stats` method shows
   the average processing time in seconds of requests from each upstream.
 
 ## v0.107.30: API changes

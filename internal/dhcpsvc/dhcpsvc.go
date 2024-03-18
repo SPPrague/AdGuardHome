@@ -7,33 +7,16 @@ import (
 	"context"
 	"net"
 	"net/netip"
-	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/next/agh"
 )
 
-// Lease is a DHCP lease.
+// Interface is a DHCP service.
 //
-// TODO(e.burkov):  Consider it to [agh], since it also may be needed in
-// [websvc].  Also think of implementing iterating methods with appropriate
-// signatures.
-type Lease struct {
-	// IP is the IP address leased to the client.
-	IP netip.Addr
-
-	// Expiry is the expiration time of the lease.
-	Expiry time.Time
-
-	// Hostname of the client.
-	Hostname string
-
-	// HWAddr is the physical hardware address (MAC address).
-	HWAddr net.HardwareAddr
-
-	// IsStatic defines if the lease is static.
-	IsStatic bool
-}
-
+// TODO(e.burkov):  Separate HostByIP, MACByIP, IPByHost into a separate
+// interface.  This is also applicable to Enabled method.
+//
+// TODO(e.burkov):  Reconsider the requirements for the leases validity.
 type Interface interface {
 	agh.ServiceWithConfig[*Config]
 
@@ -48,6 +31,8 @@ type Interface interface {
 	// MACByIP returns the MAC address for the given IP address leased.  It
 	// returns nil if there is no such client, due to an assumption that a DHCP
 	// client must always have a MAC address.
+	//
+	// TODO(e.burkov):  Think of a contract for the returned value.
 	MACByIP(ip netip.Addr) (mac net.HardwareAddr)
 
 	// IPByHost returns the IP address of the DHCP client with the given
@@ -56,22 +41,29 @@ type Interface interface {
 	// hostname, either set or generated.
 	IPByHost(host string) (ip netip.Addr)
 
-	// Leases returns all the DHCP leases.
-	Leases() (leases []*Lease)
+	// Leases returns all the active DHCP leases.  The returned slice should be
+	// a clone.
+	//
+	// TODO(e.burkov):  Consider implementing iterating methods with appropriate
+	// signatures instead of cloning the whole list.
+	Leases() (ls []*Lease)
 
-	// AddLease adds a new DHCP lease.  It returns an error if the lease is
-	// invalid or already exists.
+	// AddLease adds a new DHCP lease.  l must be valid.  It returns an error if
+	// l already exists.
 	AddLease(l *Lease) (err error)
 
-	// EditLease changes an existing DHCP lease.  It returns an error if there
-	// is no lease equal to old or if new is invalid or already exists.
-	EditLease(old, new *Lease) (err error)
+	// UpdateStaticLease replaces an existing static DHCP lease.  l must be
+	// valid.  It returns an error if the lease with the given hardware address
+	// doesn't exist or if other values match another existing lease.
+	UpdateStaticLease(l *Lease) (err error)
 
-	// RemoveLease removes an existing DHCP lease.  It returns an error if there
-	// is no lease equal to l.
+	// RemoveLease removes an existing DHCP lease.  l must be valid.  It returns
+	// an error if there is no lease equal to l.
 	RemoveLease(l *Lease) (err error)
 
 	// Reset removes all the DHCP leases.
+	//
+	// TODO(e.burkov):  If it's really needed?
 	Reset() (err error)
 }
 
@@ -79,7 +71,7 @@ type Interface interface {
 type Empty struct{}
 
 // type check
-var _ Interface = Empty{}
+var _ agh.ServiceWithConfig[*Config] = Empty{}
 
 // Start implements the [Service] interface for Empty.
 func (Empty) Start() (err error) { return nil }
@@ -87,10 +79,11 @@ func (Empty) Start() (err error) { return nil }
 // Shutdown implements the [Service] interface for Empty.
 func (Empty) Shutdown(_ context.Context) (err error) { return nil }
 
-var _ agh.ServiceWithConfig[*Config] = Empty{}
-
 // Config implements the [ServiceWithConfig] interface for Empty.
 func (Empty) Config() (conf *Config) { return nil }
+
+// type check
+var _ Interface = Empty{}
 
 // Enabled implements the [Interface] interface for Empty.
 func (Empty) Enabled() (ok bool) { return false }
@@ -104,17 +97,14 @@ func (Empty) MACByIP(_ netip.Addr) (mac net.HardwareAddr) { return nil }
 // IPByHost implements the [Interface] interface for Empty.
 func (Empty) IPByHost(_ string) (ip netip.Addr) { return netip.Addr{} }
 
-// type check
-var _ Interface = Empty{}
-
 // Leases implements the [Interface] interface for Empty.
 func (Empty) Leases() (leases []*Lease) { return nil }
 
 // AddLease implements the [Interface] interface for Empty.
 func (Empty) AddLease(_ *Lease) (err error) { return nil }
 
-// EditLease implements the [Interface] interface for Empty.
-func (Empty) EditLease(_, _ *Lease) (err error) { return nil }
+// UpdateStaticLease implements the [Interface] interface for Empty.
+func (Empty) UpdateStaticLease(_ *Lease) (err error) { return nil }
 
 // RemoveLease implements the [Interface] interface for Empty.
 func (Empty) RemoveLease(_ *Lease) (err error) { return nil }

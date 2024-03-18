@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/configmigrate"
 	"github.com/AdguardTeam/AdGuardHome/internal/version"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/stringutil"
@@ -42,7 +43,7 @@ type options struct {
 	// bindPort is the port on which to serve the HTTP UI.
 	//
 	// Deprecated: Use bindAddr.
-	bindPort int
+	bindPort uint16
 
 	// bindAddr is the address to serve the web UI on.
 	bindAddr netip.AddrPort
@@ -160,15 +161,11 @@ var cmdLineOpts = []cmdLineOpt{{
 	shortName: "h",
 }, {
 	updateWithValue: func(o options, v string) (options, error) {
-		var err error
-		var p int
-		minPort, maxPort := 0, 1<<16-1
-		if p, err = strconv.Atoi(v); err != nil {
-			err = fmt.Errorf("port %q is not a number", v)
-		} else if p < minPort || p > maxPort {
-			err = fmt.Errorf("port %d not in range %d - %d", p, minPort, maxPort)
+		p, err := strconv.ParseUint(v, 10, 16)
+		if err != nil {
+			err = fmt.Errorf("parsing port: %w", err)
 		} else {
-			o.bindPort = p
+			o.bindPort = uint16(p)
 		}
 
 		return o, err
@@ -180,7 +177,7 @@ var cmdLineOpts = []cmdLineOpt{{
 			return "", false
 		}
 
-		return strconv.Itoa(o.bindPort), true
+		return strconv.Itoa(int(o.bindPort)), true
 	},
 	description: "Deprecated. Port to serve HTTP pages on. Use --web-addr.",
 	longName:    "port",
@@ -273,15 +270,17 @@ var cmdLineOpts = []cmdLineOpt{{
 		log.Info(
 			"warning: --no-etc-hosts flag is deprecated " +
 				"and will be removed in the future versions; " +
-				"set clients.runtime_sources.hosts in the configuration file to false instead",
+				"set clients.runtime_sources.hosts and dns.hostsfile_enabled " +
+				"in the configuration file to false instead",
 		)
 
 		return nil, nil
 	},
-	serialize:   func(o options) (val string, ok bool) { return "", o.noEtcHosts },
-	description: "Deprecated: use clients.runtime_sources.hosts instead.  Do not use the OS-provided hosts.",
-	longName:    "no-etc-hosts",
-	shortName:   "",
+	serialize: func(o options) (val string, ok bool) { return "", o.noEtcHosts },
+	description: "Deprecated: use clients.runtime_sources.hosts and dns.hostsfile_enabled " +
+		"instead.  Do not use the OS-provided hosts.",
+	longName:  "no-etc-hosts",
+	shortName: "",
 }, {
 	updateWithValue: nil,
 	updateNoValue:   func(o options) (options, error) { o.localFrontend = true; return o, nil },
@@ -312,7 +311,7 @@ var cmdLineOpts = []cmdLineOpt{{
 	effect: func(o options, exec string) (effect, error) {
 		return func() error {
 			if o.verbose {
-				fmt.Println(version.Verbose())
+				fmt.Print(version.Verbose(configmigrate.LastSchemaVersion))
 			} else {
 				fmt.Println(version.Full())
 			}

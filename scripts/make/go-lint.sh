@@ -3,7 +3,7 @@
 # This comment is used to simplify checking local copies of the script.  Bump
 # this number every time a significant change is made to this script.
 #
-# AdGuard-Project-Version: 4
+# AdGuard-Project-Version: 5
 
 verbose="${VERBOSE:-0}"
 readonly verbose
@@ -30,33 +30,6 @@ set -f -u
 
 
 
-# Warnings
-
-go_version="$( "${GO:-go}" version )"
-readonly go_version
-
-go_min_version='go1.20.7'
-go_version_msg="
-warning: your go version (${go_version}) is different from the recommended minimal one (${go_min_version}).
-if you have the version installed, please set the GO environment variable.
-for example:
-
-	export GO='${go_min_version}'
-"
-readonly go_min_version go_version_msg
-
-case "$go_version"
-in
-('go version'*"$go_min_version"*)
-	# Go on.
-	;;
-(*)
-	echo "$go_version_msg" 1>&2
-	;;
-esac
-
-
-
 # Simple analyzers
 
 # blocklist_imports is a simple check against unwanted packages.  The following
@@ -74,9 +47,11 @@ esac
 #
 #      See https://github.com/golang/go/issues/45200.
 #
-#   *  Package sort is replaced by golang.org/x/exp/slices.
+#   *  Package sort is replaced by package slices.
 #
 #   *  Package unsafe is… unsafe.
+#
+#   *  Package golang.org/x/exp/slices has been moved into stdlib.
 #
 #   *  Package golang.org/x/net/context has been moved into stdlib.
 #
@@ -84,8 +59,10 @@ esac
 # schemas, which use package reflect.  If your project needs more exceptions,
 # add and document them.
 #
-# TODO(a.garipov): Add deprecated packages golang.org/x/exp/maps and
-# golang.org/x/exp/slices once all projects switch to Go 1.21.
+# TODO(a.garipov): Add golibs/log.
+#
+# TODO(a.garipov): Add deprecated package golang.org/x/exp/maps once all
+# projects switch to Go 1.22.
 blocklist_imports() {
 	git grep\
 		-e '[[:space:]]"errors"$'\
@@ -94,6 +71,7 @@ blocklist_imports() {
 		-e '[[:space:]]"reflect"$'\
 		-e '[[:space:]]"sort"$'\
 		-e '[[:space:]]"unsafe"$'\
+		-e '[[:space:]]"golang.org/x/exp/slices"$'\
 		-e '[[:space:]]"golang.org/x/net/context"$'\
 		-n\
 		-- '*.go'\
@@ -124,12 +102,10 @@ underscores() {
 	underscore_files="$(
 		git ls-files '*_*.go'\
 			| grep -F\
-			-e '_big.go'\
 			-e '_bsd.go'\
 			-e '_darwin.go'\
 			-e '_freebsd.go'\
 			-e '_linux.go'\
-			-e '_little.go'\
 			-e '_next.go'\
 			-e '_openbsd.go'\
 			-e '_others.go'\
@@ -171,48 +147,62 @@ run_linter govulncheck ./...
 run_linter gocyclo --over 10 .
 
 # TODO(a.garipov): Enable 10 for all.
-#
-# TODO(a.garipov): Redo once https://github.com/uudashr/gocognit/issues/22 is
-# fixed.
-gocognit_paths="\
-./internal/aghnet/   20
-./internal/querylog/ 20
-./internal/confmigrate/ 19
-./internal/dnsforward/  19
-./internal/home/        19
-./internal/aghtls/ 18
-./internal/filtering          17
-./internal/filtering/rewrite/ 17
-./internal/aghos/ 15
-./internal/dhcpd/ 15
-./internal/updater/ 12
-./internal/aghtest/ 11
-./internal/aghalg/               10
-./internal/aghchan/              10
-./internal/aghhttp/              10
-./internal/aghio/                10
-./internal/aghrenameio/          10
-./internal/arpdb/                10
-./internal/client/               10
-./internal/dhcpsvc               10
-./internal/filtering/hashprefix/ 10
-./internal/filtering/rulelist/   10
-./internal/filtering/safesearch/ 10
-./internal/next/                 10
-./internal/rdns/                 10
-./internal/schedule/             10
-./internal/stats/                10
-./internal/tools/                10
-./internal/version/              10
-./internal/whois/                10
-./scripts/                       10"
+run_linter gocognit --over='20'\
+	./internal/querylog/\
+	;
 
-readonly gocognit_paths
+run_linter gocognit --over='19'\
+	./internal/home/\
+	;
 
-echo "$gocognit_paths" | while read -r path max
-do
-	run_linter gocognit --over="$max" "$path"
-done
+run_linter gocognit --over='18'\
+	./internal/aghtls/\
+	;
+
+run_linter gocognit --over='15'\
+	./internal/aghos/\
+	./internal/filtering/\
+	;
+
+run_linter gocognit --over='14'\
+	./internal/dhcpd\
+	;
+
+run_linter gocognit --over='13'\
+	./internal/aghnet/\
+	;
+
+run_linter gocognit --over='12'\
+	./internal/filtering/rewrite/\
+	;
+
+run_linter gocognit --over='11'\
+	./internal/updater/\
+	;
+
+run_linter gocognit --over='10'\
+	./internal/aghalg/\
+	./internal/aghhttp/\
+	./internal/aghrenameio/\
+	./internal/aghtest/\
+	./internal/arpdb/\
+	./internal/client/\
+	./internal/configmigrate/\
+	./internal/dhcpsvc\
+	./internal/dnsforward/\
+	./internal/filtering/hashprefix/\
+	./internal/filtering/rulelist/\
+	./internal/filtering/safesearch/\
+	./internal/ipset\
+	./internal/next/\
+	./internal/rdns/\
+	./internal/schedule/\
+	./internal/stats/\
+	./internal/tools/\
+	./internal/version/\
+	./internal/whois/\
+	./scripts/\
+	;
 
 run_linter ineffassign ./...
 
@@ -226,34 +216,62 @@ run_linter looppointer ./...
 
 run_linter nilness ./...
 
-# TODO(a.garipov): Add fieldalignment?
+# TODO(a.garipov): Enable for all.
+run_linter fieldalignment \
+	./internal/aghalg/\
+	./internal/aghhttp/\
+	./internal/aghos/\
+	./internal/aghrenameio/\
+	./internal/aghtest/\
+	./internal/aghtls/\
+	./internal/arpdb/\
+	./internal/client/\
+	./internal/configmigrate/\
+	./internal/dhcpsvc/\
+	./internal/filtering/hashprefix/\
+	./internal/filtering/rewrite/\
+	./internal/filtering/rulelist/\
+	./internal/filtering/safesearch/\
+	./internal/ipset/\
+	./internal/next/...\
+	./internal/querylog/\
+	./internal/rdns/\
+	./internal/schedule/\
+	./internal/stats/\
+	./internal/updater/\
+	./internal/version/\
+	./internal/whois/\
+	;
 
 run_linter -e shadow --strict ./...
 
 # TODO(a.garipov): Enable for all.
 run_linter gosec --quiet\
-	./internal/aghalg\
-	./internal/aghchan\
-	./internal/aghhttp\
-	./internal/aghio\
-	./internal/aghnet\
-	./internal/aghos\
+	./internal/aghalg/\
+	./internal/aghchan/\
+	./internal/aghhttp/\
+	./internal/aghnet/\
+	./internal/aghos/\
 	./internal/aghrenameio/\
-	./internal/aghtest\
-	./internal/client\
-	./internal/confmigrate\
-	./internal/dhcpd\
-	./internal/dhcpsvc\
-	./internal/dnsforward\
+	./internal/aghtest/\
+	./internal/arpdb/\
+	./internal/client/\
+	./internal/configmigrate/\
+	./internal/dhcpd/\
+	./internal/dhcpsvc/\
+	./internal/dnsforward/\
 	./internal/filtering/hashprefix/\
+	./internal/filtering/rewrite/\
 	./internal/filtering/rulelist/\
-	./internal/next\
-	./internal/rdns\
-	./internal/schedule\
-	./internal/stats\
-	./internal/tools\
-	./internal/version\
-	./internal/whois\
+	./internal/filtering/safesearch/\
+	./internal/ipset/\
+	./internal/next/\
+	./internal/rdns/\
+	./internal/schedule/\
+	./internal/stats/\
+	./internal/tools/\
+	./internal/version/\
+	./internal/whois/\
 	;
 
 run_linter errcheck ./...

@@ -338,12 +338,51 @@ export const getDnsStatus = () => async (dispatch) => {
     }
 };
 
+export const timerStatusRequest = createAction('TIMER_STATUS_REQUEST');
+export const timerStatusFailure = createAction('TIMER_STATUS_FAILURE');
+export const timerStatusSuccess = createAction('TIMER_STATUS_SUCCESS');
+
+export const getTimerStatus = () => async (dispatch) => {
+    dispatch(timerStatusRequest());
+
+    const handleRequestError = () => {
+        dispatch(addErrorToast({ error: 'dns_status_error' }));
+        dispatch(dnsStatusFailure());
+        window.location.reload(true);
+    };
+
+    const handleRequestSuccess = (response) => {
+        const dnsStatus = response.data;
+        if (dnsStatus.protection_disabled_duration === 0) {
+            dnsStatus.protection_disabled_duration = null;
+        }
+        const { running } = dnsStatus;
+        const runningStatus = dnsStatus && running;
+        if (runningStatus === true) {
+            dispatch(timerStatusSuccess(dnsStatus));
+        } else {
+            dispatch(setDnsRunningStatus(running));
+        }
+    };
+
+    try {
+        checkStatus(handleRequestSuccess, handleRequestError);
+    } catch (error) {
+        handleRequestError();
+    }
+};
+
 export const testUpstreamRequest = createAction('TEST_UPSTREAM_REQUEST');
 export const testUpstreamFailure = createAction('TEST_UPSTREAM_FAILURE');
 export const testUpstreamSuccess = createAction('TEST_UPSTREAM_SUCCESS');
 
 export const testUpstream = (
-    { bootstrap_dns, upstream_dns, local_ptr_upstreams }, upstream_dns_file,
+    {
+        bootstrap_dns,
+        upstream_dns,
+        local_ptr_upstreams,
+        fallback_dns,
+    }, upstream_dns_file,
 ) => async (dispatch) => {
     dispatch(testUpstreamRequest());
     try {
@@ -352,6 +391,7 @@ export const testUpstream = (
         const config = {
             bootstrap_dns: splitByNewLine(bootstrap_dns),
             private_upstream: splitByNewLine(local_ptr_upstreams),
+            fallback_dns: splitByNewLine(fallback_dns),
             ...(upstream_dns_file ? null : {
                 upstream_dns: removeComments(upstream_dns),
             }),
@@ -363,6 +403,11 @@ export const testUpstream = (
                 const message = upstreamResponse[key];
                 if (message.startsWith('WARNING:')) {
                     dispatch(addErrorToast({ error: i18next.t('dns_test_warning_toast', { key }) }));
+                } else if (message.endsWith(': parsing error')) {
+                    const info = message.substring(0, message.indexOf(':'));
+                    const [sectionKey, line] = info.split(' ');
+                    const section = i18next.t(sectionKey);
+                    dispatch(addErrorToast({ error: i18next.t('dns_test_parsing_error_toast', { section, line }) }));
                 } else if (message !== 'OK') {
                     dispatch(addErrorToast({ error: i18next.t('dns_test_not_ok_toast', { key }) }));
                 }
@@ -386,12 +431,14 @@ export const testUpstreamWithFormValues = () => async (dispatch, getState) => {
         bootstrap_dns,
         upstream_dns,
         local_ptr_upstreams,
+        fallback_dns,
     } = getState().form[FORM_NAME.UPSTREAM].values;
 
     return dispatch(testUpstream({
         bootstrap_dns,
         upstream_dns,
         local_ptr_upstreams,
+        fallback_dns,
     }, upstream_dns_file));
 };
 
@@ -649,6 +696,24 @@ export const removeStaticLease = (config) => async (dispatch) => {
     } catch (error) {
         dispatch(addErrorToast({ error }));
         dispatch(removeStaticLeaseFailure());
+    }
+};
+
+export const updateStaticLeaseRequest = createAction('UPDATE_STATIC_LEASE_REQUEST');
+export const updateStaticLeaseFailure = createAction('UPDATE_STATIC_LEASE_FAILURE');
+export const updateStaticLeaseSuccess = createAction('UPDATE_STATIC_LEASE_SUCCESS');
+
+export const updateStaticLease = (config) => async (dispatch) => {
+    dispatch(updateStaticLeaseRequest());
+    try {
+        await apiClient.updateStaticLease(config);
+        dispatch(updateStaticLeaseSuccess(config));
+        dispatch(addSuccessToast(i18next.t('dhcp_lease_updated', { key: config.hostname || config.ip })));
+        dispatch(toggleLeaseModal());
+        dispatch(getDhcpStatus());
+    } catch (error) {
+        dispatch(addErrorToast({ error }));
+        dispatch(updateStaticLeaseFailure());
     }
 };
 

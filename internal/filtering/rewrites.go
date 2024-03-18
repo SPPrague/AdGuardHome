@@ -3,13 +3,12 @@ package filtering
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
-	"github.com/AdguardTeam/golibs/mathutil"
 	"github.com/miekg/dns"
-	"golang.org/x/exp/slices"
 )
 
 // Legacy DNS rewrites
@@ -118,28 +117,27 @@ func matchDomainWildcard(host, wildcard string) (ok bool) {
 //  2. wildcard > exact;
 //  3. lower level wildcard > higher level wildcard;
 func (rw *LegacyRewrite) Compare(b *LegacyRewrite) (res int) {
-	if rw.Type == dns.TypeCNAME && b.Type != dns.TypeCNAME {
-		return -1
-	} else if rw.Type != dns.TypeCNAME && b.Type == dns.TypeCNAME {
+	if rw.Type == dns.TypeCNAME {
+		if b.Type != dns.TypeCNAME {
+			return -1
+		}
+	} else if b.Type == dns.TypeCNAME {
 		return 1
 	}
 
-	aIsWld, bIsWld := isWildcard(rw.Domain), isWildcard(b.Domain)
-	if aIsWld == bIsWld {
+	if aIsWld, bIsWld := isWildcard(rw.Domain), isWildcard(b.Domain); aIsWld == bIsWld {
 		// Both are either wildcards or both aren't.
-		return len(rw.Domain) - len(b.Domain)
-	}
-
-	if aIsWld {
+		return len(b.Domain) - len(rw.Domain)
+	} else if aIsWld {
 		return 1
+	} else {
+		return -1
 	}
-
-	return -1
 }
 
 // prepareRewrites normalizes and validates all legacy DNS rewrites.
 func (d *DNSFilter) prepareRewrites() (err error) {
-	for i, r := range d.Rewrites {
+	for i, r := range d.conf.Rewrites {
 		err = r.normalize()
 		if err != nil {
 			return fmt.Errorf("at index %d: %w", i, err)
@@ -182,7 +180,7 @@ func findRewrites(
 		if isWildcard(r.Domain) {
 			// Don't use rewrites[:0], because we need to return at least one
 			// item here.
-			rewrites = rewrites[:mathutil.Max(1, i)]
+			rewrites = rewrites[:max(1, i)]
 
 			break
 		}

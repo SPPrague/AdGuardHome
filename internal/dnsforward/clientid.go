@@ -8,11 +8,14 @@ import (
 
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/golibs/errors"
+	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/quic-go/quic-go"
 )
 
 // ValidateClientID returns an error if id is not a valid ClientID.
+//
+// Keep in sync with [client.ValidateClientID].
 func ValidateClientID(id string) (err error) {
 	err = netutil.ValidateHostnameLabel(id)
 	if err != nil {
@@ -151,6 +154,8 @@ func (s *Server) clientIDFromDNSContext(pctx *proxy.DNSContext) (clientID string
 // DNS-over-HTTPS requests, it will return the hostname part of the Host header
 // if there is one.
 func clientServerName(pctx *proxy.DNSContext, proto proxy.Proto) (srvName string, err error) {
+	from := "tls conn"
+
 	switch proto {
 	case proxy.ProtoHTTPS:
 		r := pctx.HTTPRequest
@@ -164,6 +169,7 @@ func clientServerName(pctx *proxy.DNSContext, proto proxy.Proto) (srvName string
 			}
 
 			srvName = host
+			from = "host header"
 		}
 	case proxy.ProtoQUIC:
 		qConn := pctx.QUICConnection
@@ -182,6 +188,8 @@ func clientServerName(pctx *proxy.DNSContext, proto proxy.Proto) (srvName string
 
 		srvName = tc.ConnectionState().ServerName
 	}
+
+	log.Debug("dnsforward: got client server name %q from %s", srvName, from)
 
 	return srvName, nil
 }

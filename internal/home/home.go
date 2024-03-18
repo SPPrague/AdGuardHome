@@ -6,13 +6,15 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io/fs"
-	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -34,10 +36,10 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/version"
 	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/errors"
+	"github.com/AdguardTeam/golibs/hostsfile"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/netutil"
-	"github.com/AdguardTeam/golibs/stringutil"
-	"golang.org/x/exp/slices"
+	"github.com/AdguardTeam/golibs/osutil"
 )
 
 // Global context
@@ -65,11 +67,14 @@ type homeContext struct {
 	// Runtime properties
 	// --
 
-	configFilename string // Config filename (can be overridden via the command line arguments)
-	workDir        string // Location of our directory, used to protect against CWD being somewhere else
-	pidFileName    string // PID file name.  Empty if no PID file was created.
-	controlLock    sync.Mutex
-	tlsRoots       *x509.CertPool // list of root CAs for TLSv1.2
+	// confFilePath is the configuration file path as set by default or from the
+	// command-line options.
+	confFilePath string
+
+	workDir     string // Location of our directory, used to protect against CWD being somewhere else
+	pidFileName string // PID file name.  Empty if no PID file was created.
+	controlLock sync.Mutex
+	tlsRoots    *x509.CertPool // list of root CAs for TLSv1.2
 
 	// tlsCipherIDs are the ID of the cipher suites that AdGuard Home must use.
 	tlsCipherIDs []uint16
@@ -158,7 +163,7 @@ func setupContext(opts options) (err error) {
 		os.Exit(0)
 	}
 
-	if !opts.noEtcHosts && config.Clients.Sources.HostsFile {
+	if !opts.noEtcHosts {
 		err = setupHostsContainer()
 		if err != nil {
 			// Don't wrap the error, because it's informative enough as is.
@@ -230,23 +235,24 @@ func setupHostsContainer() (err error) {
 		return fmt.Errorf("initing hosts watcher: %w", err)
 	}
 
-	Context.etcHosts, err = aghnet.NewHostsContainer(
-		aghos.RootDirFS(),
-		hostsWatcher,
-		aghnet.DefaultHostsPaths()...,
-	)
+	paths, err := hostsfile.DefaultHostsPaths()
 	if err != nil {
-		closeErr := hostsWatcher.Close()
-		if errors.Is(err, aghnet.ErrNoHostsPaths) && closeErr == nil {
-			log.Info("warning: initing hosts container: %s", err)
-
-			return nil
-		}
-
-		return errors.WithDeferred(fmt.Errorf("initing hosts container: %w", err), closeErr)
+		return fmt.Errorf("getting default system hosts paths: %w", err)
 	}
 
-	return nil
+	Context.etcHosts, err = aghnet.NewHostsContainer(osutil.RootDirFS(), hostsWatcher, paths...)
+	if err != nil {
+		closeErr := hostsWatcher.Close()
+		if errors.Is(err, aghnet.ErrNoHostsPaths) {
+			log.Info("warning: initing hosts container: %s", err)
+
+			return closeErr
+		}
+
+		return errors.Join(fmt.Errorf("initializing hosts container: %w", err), closeErr)
+	}
+
+	return hostsWatcher.Start()
 }
 
 // setupOpts sets up command-line options.
@@ -292,19 +298,13 @@ func initContextClients() (err error) {
 		arpDB = arpdb.New()
 	}
 
-	err = Context.clients.Init(
+	return Context.clients.Init(
 		config.Clients.Persistent,
 		Context.dhcpServer,
 		Context.etcHosts,
 		arpDB,
 		config.Filtering,
 	)
-	if err != nil {
-		// Don't wrap the error, because it's informative enough as is.
-		return err
-	}
-
-	return nil
 }
 
 // setupBindOpts overrides bind host/port from the opts.
@@ -327,7 +327,7 @@ func setupBindOpts(opts options) (err error) {
 	if opts.bindPort != 0 {
 		config.HTTPConfig.Address = netip.AddrPortFrom(
 			config.HTTPConfig.Address.Addr(),
-			uint16(opts.bindPort),
+			opts.bindPort,
 		)
 
 		err = checkPorts()
@@ -359,12 +359,14 @@ func setupDNSFilteringConf(conf *filtering.Config) (err error) {
 		pcService             = "parental control"
 		defaultParentalServer = `https://family.adguard-dns.com/dns-query`
 		pcTXTSuffix           = `pc.dns.adguard.com.`
-
-		defaultSafeBrowsingBlockHost = "standard-block.dns.adguard.com"
-		defaultParentalBlockHost     = "family-block.dns.adguard.com"
 	)
 
 	conf.EtcHosts = Context.etcHosts
+	// TODO(s.chzhen):  Use empty interface.
+	if Context.etcHosts == nil || !config.DNS.HostsFileEnabled {
+		conf.EtcHosts = nil
+	}
+
 	conf.ConfigModified = onConfigModified
 	conf.HTTPRegister = httpRegister
 	conf.DataDir = Context.getDataDir()
@@ -377,11 +379,15 @@ func setupDNSFilteringConf(conf *filtering.Config) (err error) {
 
 	upsOpts := &upstream.Options{
 		Timeout: dnsTimeout,
-		ServerIPAddrs: []net.IP{
-			{94, 140, 14, 15},
-			{94, 140, 15, 16},
-			net.ParseIP("2a10:50c0::bad1:ff"),
-			net.ParseIP("2a10:50c0::bad2:ff"),
+		Bootstrap: upstream.StaticResolver{
+			// 94.140.14.15.
+			netip.AddrFrom4([4]byte{94, 140, 14, 15}),
+			// 94.140.14.16.
+			netip.AddrFrom4([4]byte{94, 140, 14, 16}),
+			// 2a10:50c0::bad1:ff.
+			netip.AddrFrom16([16]byte{42, 16, 80, 192, 12: 186, 209, 0, 255}),
+			// 2a10:50c0::bad2:ff.
+			netip.AddrFrom16([16]byte{42, 16, 80, 192, 12: 186, 210, 0, 255}),
 		},
 	}
 
@@ -398,8 +404,15 @@ func setupDNSFilteringConf(conf *filtering.Config) (err error) {
 		CacheSize:   conf.SafeBrowsingCacheSize,
 	})
 
-	if conf.SafeBrowsingBlockHost != "" {
-		conf.SafeBrowsingBlockHost = defaultSafeBrowsingBlockHost
+	// Protect against invalid configuration, see #6181.
+	//
+	// TODO(a.garipov): Validate against an empty host instead of setting it to
+	// default.
+	if conf.SafeBrowsingBlockHost == "" {
+		host := defaultSafeBrowsingBlockHost
+		log.Info("%s: warning: empty blocking host; using default: %q", sbService, host)
+
+		conf.SafeBrowsingBlockHost = host
 	}
 
 	parUps, err := upstream.AddressToUpstream(defaultParentalServer, upsOpts)
@@ -415,8 +428,15 @@ func setupDNSFilteringConf(conf *filtering.Config) (err error) {
 		CacheSize:   conf.ParentalCacheSize,
 	})
 
-	if conf.ParentalBlockHost != "" {
-		conf.ParentalBlockHost = defaultParentalBlockHost
+	// Protect against invalid configuration, see #6181.
+	//
+	// TODO(a.garipov): Validate against an empty host instead of setting it to
+	// default.
+	if conf.ParentalBlockHost == "" {
+		host := defaultParentalBlockHost
+		log.Info("%s: warning: empty blocking host; using default: %q", pcService, host)
+
+		conf.ParentalBlockHost = host
 	}
 
 	conf.SafeSearchConf.CustomResolver = safeSearchResolver{}
@@ -474,7 +494,14 @@ func initWeb(opts options, clientBuildFS fs.FS, upd *updater.Updater) (web *webA
 		}
 	}
 
-	disableUpdate := opts.disableUpdate || version.Channel() == version.ChannelDevelopment
+	disableUpdate := opts.disableUpdate
+	switch version.Channel() {
+	case
+		version.ChannelDevelopment,
+		version.ChannelCandidate:
+		disableUpdate = true
+	}
+
 	if disableUpdate {
 		log.Info("AdGuard Home updates are disabled")
 	}
@@ -484,8 +511,7 @@ func initWeb(opts options, clientBuildFS fs.FS, upd *updater.Updater) (web *webA
 
 		clientFS: clientFS,
 
-		BindHost: config.HTTPConfig.Address.Addr(),
-		BindPort: int(config.HTTPConfig.Address.Port()),
+		BindAddr: config.HTTPConfig.Address,
 
 		ReadTimeout:       readTimeout,
 		ReadHeaderTimeout: readHdrTimeout,
@@ -548,16 +574,31 @@ func run(opts options, clientBuildFS fs.FS, done chan struct{}) {
 	err = setupOpts(opts)
 	fatalOnError(err)
 
+	execPath, err := os.Executable()
+	fatalOnError(errors.Annotate(err, "getting executable path: %w"))
+
+	u := &url.URL{
+		Scheme: "https",
+		// TODO(a.garipov): Make configurable.
+		Host: "static.adtidy.org",
+		Path: path.Join("adguardhome", version.Channel(), "version.json"),
+	}
+
+	confPath := configFilePath()
+	log.Debug("using config path %q for updater", confPath)
+
 	upd := updater.NewUpdater(&updater.Config{
-		Client:   config.Filtering.HTTPClient,
-		Version:  version.Version(),
-		Channel:  version.Channel(),
-		GOARCH:   runtime.GOARCH,
-		GOOS:     runtime.GOOS,
-		GOARM:    version.GOARM(),
-		GOMIPS:   version.GOMIPS(),
-		WorkDir:  Context.workDir,
-		ConfName: config.getConfigFilename(),
+		Client:          config.Filtering.HTTPClient,
+		Version:         version.Version(),
+		Channel:         version.Channel(),
+		GOARCH:          runtime.GOARCH,
+		GOOS:            runtime.GOOS,
+		GOARM:           version.GOARM(),
+		GOMIPS:          version.GOMIPS(),
+		WorkDir:         Context.workDir,
+		ConfName:        confPath,
+		ExecPath:        execPath,
+		VersionCheckURL: u.String(),
 	})
 
 	// TODO(e.burkov): This could be made earlier, probably as the option's
@@ -584,7 +625,7 @@ func run(opts options, clientBuildFS fs.FS, done chan struct{}) {
 	Context.auth, err = initUsers()
 	fatalOnError(err)
 
-	Context.tls, err = newTLSManager(config.TLS)
+	Context.tls, err = newTLSManager(config.TLS, config.DNS.ServePlainDNS)
 	if err != nil {
 		log.Error("initializing tls: %s", err)
 		onConfigModified()
@@ -719,7 +760,16 @@ func writePIDFile(fn string) bool {
 // initConfigFilename sets up context config file path.  This file path can be
 // overridden by command-line arguments, or is set to default.
 func initConfigFilename(opts options) {
-	Context.configFilename = stringutil.Coalesce(opts.confFilename, "AdGuardHome.yaml")
+	confPath := opts.confFilename
+	if confPath == "" {
+		Context.confFilePath = "AdGuardHome.yaml"
+
+		return
+	}
+
+	log.Debug("config path overridden to %q from cmdline", confPath)
+
+	Context.confFilePath = confPath
 }
 
 // initWorkingDir initializes the workDir.  If no command-line arguments are
@@ -828,7 +878,7 @@ func loadCmdLineOpts() (opts options) {
 // example:
 //
 //	go to http://127.0.0.1:80
-func printWebAddrs(proto, addr string, port int) {
+func printWebAddrs(proto, addr string, port uint16) {
 	log.Printf("go to %s://%s", proto, netutil.JoinHostPort(addr, port))
 }
 
@@ -840,7 +890,7 @@ func printHTTPAddresses(proto string) {
 		Context.tls.WriteDiskConfig(&tlsConf)
 	}
 
-	port := int(config.HTTPConfig.Address.Port())
+	port := config.HTTPConfig.Address.Port()
 	if proto == aghhttp.SchemeHTTPS {
 		port = tlsConf.PortHTTPS
 	}
@@ -877,16 +927,23 @@ func printHTTPAddresses(proto string) {
 	}
 }
 
-// -------------------
-// first run / install
-// -------------------
-func detectFirstRun() bool {
-	configfile := Context.configFilename
-	if !filepath.IsAbs(configfile) {
-		configfile = filepath.Join(Context.workDir, Context.configFilename)
+// detectFirstRun returns true if this is the first run of AdGuard Home.
+func detectFirstRun() (ok bool) {
+	confPath := Context.confFilePath
+	if !filepath.IsAbs(confPath) {
+		confPath = filepath.Join(Context.workDir, Context.confFilePath)
 	}
-	_, err := os.Stat(configfile)
-	return errors.Is(err, os.ErrNotExist)
+
+	_, err := os.Stat(confPath)
+	if err == nil {
+		return false
+	} else if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+
+	log.Error("detecting first run: %s; considering first run", err)
+
+	return true
 }
 
 // jsonError is a generic JSON error response.

@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghhttp"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering/rulelist"
 	"github.com/AdguardTeam/AdGuardHome/internal/schedule"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/urlfilter/rules"
-	"golang.org/x/exp/slices"
 )
 
 // serviceRules maps a service ID to its filtering rules.
@@ -28,7 +29,7 @@ func initBlockedServices() {
 	for i, s := range blockedServices {
 		netRules := make([]*rules.NetworkRule, 0, len(s.Rules))
 		for _, text := range s.Rules {
-			rule, err := rules.NewNetworkRule(text, BlockedSvcsListID)
+			rule, err := rules.NewNetworkRule(text, rulelist.URLFilterIDBlockedService)
 			if err != nil {
 				log.Error("parsing blocked service %q rule %q: %s", s.ID, text, err)
 
@@ -83,12 +84,12 @@ func (s *BlockedServices) Validate() (err error) {
 
 // ApplyBlockedServices - set blocked services settings for this DNS request
 func (d *DNSFilter) ApplyBlockedServices(setts *Settings) {
-	d.confLock.RLock()
-	defer d.confLock.RUnlock()
+	d.confMu.RLock()
+	defer d.confMu.RUnlock()
 
 	setts.ServicesRules = []ServiceEntry{}
 
-	bsvc := d.BlockedServices
+	bsvc := d.conf.BlockedServices
 
 	// TODO(s.chzhen):  Use startTime from [dnsforward.dnsContext].
 	if !bsvc.Schedule.Contains(time.Now()) {
@@ -130,9 +131,13 @@ func (d *DNSFilter) handleBlockedServicesAll(w http.ResponseWriter, r *http.Requ
 //
 // Deprecated:  Use handleBlockedServicesGet.
 func (d *DNSFilter) handleBlockedServicesList(w http.ResponseWriter, r *http.Request) {
-	d.confLock.RLock()
-	list := d.Config.BlockedServices.IDs
-	d.confLock.RUnlock()
+	var list []string
+	func() {
+		d.confMu.Lock()
+		defer d.confMu.Unlock()
+
+		list = d.conf.BlockedServices.IDs
+	}()
 
 	aghhttp.WriteJSONResponseOK(w, r, list)
 }
@@ -150,13 +155,15 @@ func (d *DNSFilter) handleBlockedServicesSet(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	d.confLock.Lock()
-	d.Config.BlockedServices.IDs = list
-	d.confLock.Unlock()
+	func() {
+		d.confMu.Lock()
+		defer d.confMu.Unlock()
 
-	log.Debug("Updated blocked services list: %d", len(list))
+		d.conf.BlockedServices.IDs = list
+		log.Debug("Updated blocked services list: %d", len(list))
+	}()
 
-	d.Config.ConfigModified()
+	d.conf.ConfigModified()
 }
 
 // handleBlockedServicesGet is the handler for the GET
@@ -164,10 +171,10 @@ func (d *DNSFilter) handleBlockedServicesSet(w http.ResponseWriter, r *http.Requ
 func (d *DNSFilter) handleBlockedServicesGet(w http.ResponseWriter, r *http.Request) {
 	var bsvc *BlockedServices
 	func() {
-		d.confLock.RLock()
-		defer d.confLock.RUnlock()
+		d.confMu.RLock()
+		defer d.confMu.RUnlock()
 
-		bsvc = d.Config.BlockedServices.Clone()
+		bsvc = d.conf.BlockedServices.Clone()
 	}()
 
 	aghhttp.WriteJSONResponseOK(w, r, bsvc)
@@ -196,13 +203,13 @@ func (d *DNSFilter) handleBlockedServicesUpdate(w http.ResponseWriter, r *http.R
 	}
 
 	func() {
-		d.confLock.Lock()
-		defer d.confLock.Unlock()
+		d.confMu.Lock()
+		defer d.confMu.Unlock()
 
-		d.Config.BlockedServices = bsvc
+		d.conf.BlockedServices = bsvc
 	}()
 
 	log.Debug("updated blocked services schedule: %d", len(bsvc.IDs))
 
-	d.Config.ConfigModified()
+	d.conf.ConfigModified()
 }

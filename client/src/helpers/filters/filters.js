@@ -142,11 +142,11 @@ export default {
             "homepage": "https://github.com/AdguardTeam/AdGuardSDNSFilter",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt"
         },
-        "adway_default_blocklist": {
-            "name": "AdAway Default Blocklist",
+        "awavenue_ads_rule": {
+            "name": "AWAvenue Ads Rule",
             "categoryId": "general",
-            "homepage": "https://github.com/AdAway/adaway.github.io/",
-            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt"
+            "homepage": "https://awavenue.top/",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_53.txt"
         },
         "curben_phishing_filter": {
             "name": "Phishing URL Blocklist (PhishTank and OpenPhish)",
@@ -190,6 +190,18 @@ export default {
             "homepage": "https://github.com/hagezi/dns-blocklists#piracy",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_46.txt"
         },
+        "hagezi_dyndns_blocklist": {
+            "name": "HaGeZi's DynDNS Blocklist",
+            "categoryId": "security",
+            "homepage": "https://github.com/hagezi/dns-blocklists",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_54.txt"
+        },
+        "hagezi_encrypted_dns_vpn_tor_proxy_bypass": {
+            "name": "HaGeZi's Encrypted DNS/VPN/TOR/Proxy Bypass",
+            "categoryId": "security",
+            "homepage": "https://github.com/hagezi/dns-blocklists#bypass",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_52.txt"
+        },
         "hagezi_gambling_blocklist": {
             "name": "HaGeZi's Gambling Blocklist",
             "categoryId": "other",
@@ -197,16 +209,34 @@ export default {
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_47.txt"
         },
         "hagezi_multinormal": {
-            "name": "HaGeZi Multi NORMAL",
+            "name": "HaGeZi's Normal Blocklist",
             "categoryId": "general",
             "homepage": "https://github.com/hagezi/dns-blocklists",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_34.txt"
+        },
+        "hagezi_pro": {
+            "name": "HaGeZi's Pro Blocklist",
+            "categoryId": "general",
+            "homepage": "https://github.com/hagezi/dns-blocklists",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_48.txt"
+        },
+        "hagezi_pro++": {
+            "name": "HaGeZi's Pro++ Blocklist",
+            "categoryId": "general",
+            "homepage": "https://github.com/hagezi/dns-blocklists",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_51.txt"
         },
         "hagezi_threat_intelligence_feeds": {
             "name": "HaGeZi's Threat Intelligence Feeds",
             "categoryId": "security",
             "homepage": "https://github.com/hagezi/dns-blocklists",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_44.txt"
+        },
+        "hagezi_ultimate": {
+            "name": "HaGeZi's Ultimate Blocklist",
+            "categoryId": "general",
+            "homepage": "https://github.com/hagezi/dns-blocklists",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_49.txt"
         },
         "no_google": {
             "name": "No Google",
@@ -219,12 +249,6 @@ export default {
             "categoryId": "security",
             "homepage": "https://github.com/hoshsadiq/adblock-nocoin-list/",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_8.txt"
-        },
-        "notracking_hosts_blocklists": {
-            "name": "The NoTracking blocklist",
-            "categoryId": "general",
-            "homepage": "https://github.com/notracking/hosts-blocklists",
-            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_32.txt"
         },
         "oisd_basic": {
             "name": "OISD Blocklist Small",
@@ -285,6 +309,12 @@ export default {
             "categoryId": "security",
             "homepage": "https://github.com/mitchellkrogza/The-Big-List-of-Hacked-Malware-Web-Sites",
             "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_9.txt"
+        },
+        "ublock_badware_risks": {
+            "name": "uBlock₀ filters – Badware risks",
+            "categoryId": "security",
+            "homepage": "https://github.com/uBlockOrigin/uAssets",
+            "source": "https://adguardteam.github.io/HostlistsRegistry/assets/filter_50.txt"
         },
         "urlhaus_filter_online": {
             "name": "Malicious URL Blocklist (URLHaus)",

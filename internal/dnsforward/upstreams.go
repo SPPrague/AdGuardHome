@@ -1,21 +1,20 @@
 package dnsforward
 
 import (
-	"bytes"
 	"fmt"
-	"net"
-	"net/url"
+	"net/netip"
 	"os"
-	"strings"
+	"slices"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
+	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/AdguardTeam/golibs/stringutil"
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 // loadUpstreams parses upstream DNS servers from the configured file or from
@@ -39,7 +38,7 @@ func (s *Server) loadUpstreams() (upstreams []string, err error) {
 }
 
 // prepareUpstreamSettings sets upstream DNS server settings.
-func (s *Server) prepareUpstreamSettings() (err error) {
+func (s *Server) prepareUpstreamSettings(boot upstream.Resolver) (err error) {
 	// Load upstreams either from the file, or from the settings
 	var upstreams []string
 	upstreams, err = s.loadUpstreams()
@@ -48,7 +47,7 @@ func (s *Server) prepareUpstreamSettings() (err error) {
 	}
 
 	s.conf.UpstreamConfig, err = s.prepareUpstreamConfig(upstreams, defaultDNS, &upstream.Options{
-		Bootstrap:    s.conf.BootstrapDNS,
+		Bootstrap:    boot,
 		Timeout:      s.conf.UpstreamTimeout,
 		HTTPVersions: UpstreamHTTPVersions(s.conf.UseHTTP3Upstreams),
 		PreferIPv6:   s.conf.BootstrapPreferIPv6,
@@ -69,8 +68,8 @@ func (s *Server) prepareUpstreamSettings() (err error) {
 	return nil
 }
 
-// prepareUpstreamConfig sets upstream configuration based on upstreams and
-// configuration of s.
+// prepareUpstreamConfig returns the upstream configuration based on upstreams
+// and configuration of s.
 func (s *Server) prepareUpstreamConfig(
 	upstreams []string,
 	defaultUpstreams []string,
@@ -92,176 +91,7 @@ func (s *Server) prepareUpstreamConfig(
 		uc.Upstreams = defaultUpstreamConfig.Upstreams
 	}
 
-	// dnsFilter can be nil during application update.
-	if s.dnsFilter != nil && s.dnsFilter.EtcHosts != nil {
-		err = s.replaceUpstreamsWithHosts(uc, opts)
-		if err != nil {
-			return nil, fmt.Errorf("resolving upstreams with hosts: %w", err)
-		}
-	}
-
 	return uc, nil
-}
-
-// replaceUpstreamsWithHosts replaces unique upstreams with their resolved
-// versions based on the system hosts file.
-//
-// TODO(e.burkov):  This should be performed inside dnsproxy, which should
-// actually consider /etc/hosts.  See TODO on [aghnet.HostsContainer].
-func (s *Server) replaceUpstreamsWithHosts(
-	upsConf *proxy.UpstreamConfig,
-	opts *upstream.Options,
-) (err error) {
-	resolved := map[string]*upstream.Options{}
-
-	err = s.resolveUpstreamsWithHosts(resolved, upsConf.Upstreams, opts)
-	if err != nil {
-		return fmt.Errorf("resolving upstreams: %w", err)
-	}
-
-	hosts := maps.Keys(upsConf.DomainReservedUpstreams)
-	// TODO(e.burkov):  Think of extracting sorted range into an util function.
-	slices.Sort(hosts)
-	for _, host := range hosts {
-		err = s.resolveUpstreamsWithHosts(resolved, upsConf.DomainReservedUpstreams[host], opts)
-		if err != nil {
-			return fmt.Errorf("resolving upstreams reserved for %s: %w", host, err)
-		}
-	}
-
-	hosts = maps.Keys(upsConf.SpecifiedDomainUpstreams)
-	slices.Sort(hosts)
-	for _, host := range hosts {
-		err = s.resolveUpstreamsWithHosts(resolved, upsConf.SpecifiedDomainUpstreams[host], opts)
-		if err != nil {
-			return fmt.Errorf("resolving upstreams specific for %s: %w", host, err)
-		}
-	}
-
-	return nil
-}
-
-// resolveUpstreamsWithHosts resolves the IP addresses of each of the upstreams
-// and replaces those both in upstreams and resolved.  Upstreams that failed to
-// resolve are placed to resolved as-is.  This function only returns error of
-// upstreams closing.
-func (s *Server) resolveUpstreamsWithHosts(
-	resolved map[string]*upstream.Options,
-	upstreams []upstream.Upstream,
-	opts *upstream.Options,
-) (err error) {
-	for i := range upstreams {
-		u := upstreams[i]
-		addr := u.Address()
-		host := extractUpstreamHost(addr)
-
-		withIPs, ok := resolved[host]
-		if !ok {
-			recs := s.dnsFilter.EtcHosts.MatchName(host)
-			if len(recs) == 0 {
-				resolved[host] = nil
-
-				return nil
-			}
-
-			withIPs = opts.Clone()
-			withIPs.ServerIPAddrs = make([]net.IP, 0, len(recs))
-			for _, rec := range recs {
-				withIPs.ServerIPAddrs = append(withIPs.ServerIPAddrs, rec.Addr.AsSlice())
-			}
-
-			sortNetIPAddrs(withIPs.ServerIPAddrs, opts.PreferIPv6)
-			resolved[host] = withIPs
-		} else if withIPs == nil {
-			continue
-		}
-
-		if err = u.Close(); err != nil {
-			return fmt.Errorf("closing upstream %s: %w", addr, err)
-		}
-
-		upstreams[i], err = upstream.AddressToUpstream(addr, withIPs)
-		if err != nil {
-			return fmt.Errorf("replacing upstream %s with resolved %s: %w", addr, host, err)
-		}
-
-		log.Debug("dnsforward: using %s for %s", withIPs.ServerIPAddrs, upstreams[i].Address())
-	}
-
-	return nil
-}
-
-// extractUpstreamHost returns the hostname of addr without port with an
-// assumption that any address passed here has already been successfully parsed
-// by [upstream.AddressToUpstream].  This function essentially mirrors the logic
-// of [upstream.AddressToUpstream], see TODO on [replaceUpstreamsWithHosts].
-func extractUpstreamHost(addr string) (host string) {
-	var err error
-	if strings.Contains(addr, "://") {
-		var u *url.URL
-		u, err = url.Parse(addr)
-		if err != nil {
-			log.Debug("dnsforward: parsing upstream %s: %s", addr, err)
-
-			return addr
-		}
-
-		return u.Hostname()
-	}
-
-	// Probably, plain UDP upstream defined by address or address:port.
-	host, err = netutil.SplitHost(addr)
-	if err != nil {
-		return addr
-	}
-
-	return host
-}
-
-// sortNetIPAddrs sorts addrs in accordance with the protocol preferences.
-// Invalid addresses are sorted near the end.
-//
-// TODO(e.burkov):  This function taken from dnsproxy, which also already
-// contains a few similar functions.  Think of moving to golibs.
-func sortNetIPAddrs(addrs []net.IP, preferIPv6 bool) {
-	l := len(addrs)
-	if l <= 1 {
-		return
-	}
-
-	slices.SortStableFunc(addrs, func(addrA, addrB net.IP) (res int) {
-		switch len(addrA) {
-		case net.IPv4len, net.IPv6len:
-			switch len(addrB) {
-			case net.IPv4len, net.IPv6len:
-				// Go on.
-			default:
-				return -1
-			}
-		default:
-			return 1
-		}
-
-		// Treat IPv6-mapped IPv4 addresses as IPv6 addresses.
-		aIs4, bIs4 := addrA.To4() != nil, addrB.To4() != nil
-		if aIs4 == bIs4 {
-			return bytes.Compare(addrA, addrB)
-		}
-
-		if aIs4 {
-			if preferIPv6 {
-				return 1
-			}
-
-			return -1
-		}
-
-		if preferIPv6 {
-			return -1
-		}
-
-		return 1
-	})
 }
 
 // UpstreamHTTPVersions returns the HTTP versions for upstream configuration
@@ -282,16 +112,103 @@ func UpstreamHTTPVersions(http3 bool) (v []upstream.HTTPVersion) {
 // based on provided parameters.
 func setProxyUpstreamMode(
 	conf *proxy.Config,
-	allServers bool,
-	fastestAddr bool,
+	upstreamMode UpstreamMode,
 	fastestTimeout time.Duration,
-) {
-	if allServers {
+) (err error) {
+	switch upstreamMode {
+	case UpstreamModeParallel:
 		conf.UpstreamMode = proxy.UModeParallel
-	} else if fastestAddr {
+	case UpstreamModeFastestAddr:
 		conf.UpstreamMode = proxy.UModeFastestAddr
 		conf.FastestPingTimeout = fastestTimeout
-	} else {
+	case UpstreamModeLoadBalance:
 		conf.UpstreamMode = proxy.UModeLoadBalance
+	default:
+		return fmt.Errorf("unexpected value %q", upstreamMode)
 	}
+
+	return nil
+}
+
+// createBootstrap returns a bootstrap resolver based on the configuration of s.
+// boots are the upstream resolvers that should be closed after use.  r is the
+// actual bootstrap resolver, which may include the system hosts.
+//
+// TODO(e.burkov):  This function currently returns a resolver and a slice of
+// the upstream resolvers, which are essentially the same.  boots are returned
+// for being able to close them afterwards, but it introduces an implicit
+// contract that r could only be used before that.  Anyway, this code should
+// improve when the [proxy.UpstreamConfig] will become an [upstream.Resolver]
+// and be used here.
+func (s *Server) createBootstrap(
+	addrs []string,
+	opts *upstream.Options,
+) (r upstream.Resolver, boots []*upstream.UpstreamResolver, err error) {
+	if len(addrs) == 0 {
+		addrs = defaultBootstrap
+	}
+
+	boots, err = aghnet.ParseBootstraps(addrs, opts)
+	if err != nil {
+		// Don't wrap the error, since it's informative enough as is.
+		return nil, nil, err
+	}
+
+	var parallel upstream.ParallelResolver
+	for _, b := range boots {
+		parallel = append(parallel, upstream.NewCachingResolver(b))
+	}
+
+	if s.etcHosts != nil {
+		r = upstream.ConsequentResolver{s.etcHosts, parallel}
+	} else {
+		r = parallel
+	}
+
+	return r, boots, nil
+}
+
+// IsCommentOrEmpty returns true if s starts with a "#" character or is empty.
+// This function is useful for filtering out non-upstream lines from upstream
+// configs.
+func IsCommentOrEmpty(s string) (ok bool) {
+	return len(s) == 0 || s[0] == '#'
+}
+
+// ValidateUpstreamsPrivate validates each upstream and returns an error if any
+// upstream is invalid or if there are no default upstreams specified.  It also
+// checks each domain of domain-specific upstreams for being ARPA pointing to
+// a locally-served network.  privateNets must not be nil.
+func ValidateUpstreamsPrivate(upstreams []string, privateNets netutil.SubnetSet) (err error) {
+	conf, err := proxy.ParseUpstreamsConfig(upstreams, &upstream.Options{})
+	if err != nil {
+		return fmt.Errorf("creating config: %w", err)
+	}
+
+	if conf == nil {
+		return nil
+	}
+
+	keys := maps.Keys(conf.DomainReservedUpstreams)
+	slices.Sort(keys)
+
+	var errs []error
+	for _, domain := range keys {
+		var subnet netip.Prefix
+		subnet, err = extractARPASubnet(domain)
+		if err != nil {
+			errs = append(errs, err)
+
+			continue
+		}
+
+		if !privateNets.Contains(subnet.Addr()) {
+			errs = append(
+				errs,
+				fmt.Errorf("arpa domain %q should point to a locally-served network", domain),
+			)
+		}
+	}
+
+	return errors.Annotate(errors.Join(errs...), "checking domain-specific upstreams: %w")
 }

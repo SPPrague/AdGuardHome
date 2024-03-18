@@ -15,7 +15,6 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/version"
 	"github.com/AdguardTeam/golibs/httphdr"
 	"github.com/AdguardTeam/golibs/log"
-	"github.com/AdguardTeam/golibs/mathutil"
 	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/NYTimes/gziphandler"
 )
@@ -24,11 +23,9 @@ import (
 // addresses to a slice of strings.
 func appendDNSAddrs(dst []string, addrs ...netip.Addr) (res []string) {
 	for _, addr := range addrs {
-		var hostport string
-		if config.DNS.Port != defaultPortDNS {
-			hostport = netip.AddrPortFrom(addr, uint16(config.DNS.Port)).String()
-		} else {
-			hostport = addr.String()
+		hostport := addr.String()
+		if p := config.DNS.Port; p != defaultPortDNS {
+			hostport = netutil.JoinHostPort(hostport, p)
 		}
 
 		dst = append(dst, hostport)
@@ -102,7 +99,7 @@ type statusResponse struct {
 	Version  string   `json:"version"`
 	Language string   `json:"language"`
 	DNSAddrs []string `json:"dns_addresses"`
-	DNSPort  int      `json:"dns_port"`
+	DNSPort  uint16   `json:"dns_port"`
 	HTTPPort uint16   `json:"http_port"`
 
 	// ProtectionDisabledDuration is the duration of the protection pause in
@@ -147,10 +144,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			// Make sure that we don't send negative numbers to the frontend,
 			// since enough time might have passed to make the difference less
 			// than zero.
-			protectionDisabledDuration = mathutil.Max(
-				0,
-				time.Until(*protectionDisabledUntil).Milliseconds(),
-			)
+			protectionDisabledDuration = max(0, time.Until(*protectionDisabledUntil).Milliseconds())
 		}
 
 		resp = statusResponse{
@@ -340,7 +334,7 @@ func handleHTTPSRedirect(w http.ResponseWriter, r *http.Request) (proceed bool) 
 	var (
 		forceHTTPS bool
 		serveHTTP3 bool
-		portHTTPS  int
+		portHTTPS  uint16
 	)
 	func() {
 		config.RLock()
@@ -394,7 +388,7 @@ func handleHTTPSRedirect(w http.ResponseWriter, r *http.Request) (proceed bool) 
 
 // httpsURL returns a copy of u for redirection to the HTTPS version, taking the
 // hostname and the HTTPS port into account.
-func httpsURL(u *url.URL, host string, portHTTPS int) (redirectURL *url.URL) {
+func httpsURL(u *url.URL, host string, portHTTPS uint16) (redirectURL *url.URL) {
 	hostPort := host
 	if portHTTPS != defaultPortHTTPS {
 		hostPort = netutil.JoinHostPort(host, portHTTPS)

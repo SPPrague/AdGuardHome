@@ -13,9 +13,15 @@ import (
 func TestGenAnswerHTTPS_andSVCB(t *testing.T) {
 	// Preconditions.
 
-	s := &Server{
-		dnsFilter: &filtering.DNSFilter{},
-	}
+	s := createTestServer(t, &filtering.Config{
+		BlockingMode: filtering.BlockingModeDefault,
+	}, ServerConfig{
+		Config: Config{
+			UpstreamMode:     UpstreamModeLoadBalance,
+			EDNSClientSubnet: &EDNSClientSubnet{Enabled: false},
+		},
+		ServePlainDNS: true,
+	})
 
 	req := &dns.Msg{
 		Question: []dns.Question{{

@@ -566,6 +566,26 @@
               'schema':
                 '$ref': '#/components/schemas/Error'
           'description': 'Not implemented (for example, on Windows).'
+  '/dhcp/update_static_lease':
+    'post':
+      'tags':
+      - 'dhcp'
+      'operationId': 'dhcpUpdateStaticLease'
+      'description': >
+        Updates IP address, hostname of the static lease.  IP version must be
+        the same as previous.
+      'summary': 'Updates a static lease'
+      'requestBody':
+        '$ref': '#/components/requestBodies/DhcpStaticLease'
+      'responses':
+        '200':
+          'description': 'OK.'
+        '501':
+          'content':
+            'application/json':
+              'schema':
+                '$ref': '#/components/schemas/Error'
+          'description': 'Not implemented (for example, on Windows).'
   '/dhcp/reset':
     'post':
       'tags':
@@ -1448,6 +1468,23 @@
           'type': 'boolean'
         'ratelimit':
           'type': 'integer'
+        'ratelimit_subnet_subnet_len_ipv4':
+          'description': 'Length of the subnet mask for IPv4 addresses.'
+          'type': 'integer'
+          'default': 24
+          'minimum': 0
+          'maximum': 32
+        'ratelimit_subnet_subnet_len_ipv6':
+          'description': 'Length of the subnet mask for IPv6 addresses.'
+          'type': 'integer'
+          'default': 56
+          'minimum': 0
+          'maximum': 128
+        'ratelimit_whitelist':
+          'type': 'array'
+          'description': 'List of IP addresses excluded from rate limiting.'
+          'items':
+            'type': 'string'
         'blocking_mode':
           'type': 'string'
           'enum':
@@ -1460,6 +1497,10 @@
           'type': 'string'
         'blocking_ipv6':
           'type': 'string'
+        'blocked_response_ttl':
+          'type': 'integer'
+          'minimum': 0
+          'description': 'TTL for blocked responses.'
         'protection_disabled_until':
           'type': 'string'
           'description': 'Protection is pause until this time.  Nullable.'
@@ -1483,10 +1524,15 @@
         'cache_optimistic':
           'type': 'boolean'
         'upstream_mode':
+          'type': 'string'
           'enum':
-          - ''
-          - 'parallel'
-          - 'fastest_addr'
+          - const: ''
+            deprecated: true
+            description: Use `load_balance` instead.
+          - const: 'fastest_addr'
+          - const: 'load_balance'
+          - const: 'parallel'
+          'description': Upstream modes enumeration.
         'use_private_ptr_resolvers':
           'type': 'boolean'
         'resolve_clients':
@@ -1503,7 +1549,7 @@
           - 'tls://1.0.0.1'
     'UpstreamsConfig':
       'type': 'object'
-      'description': 'Upstreams configuration'
+      'description': 'Upstream configuration to be tested'
       'required':
       - 'bootstrap_dns'
       - 'upstream_dns'
@@ -1511,8 +1557,7 @@
         'bootstrap_dns':
           'type': 'array'
           'description': >
-            Bootstrap servers, port is optional after colon.  Empty value will
-            reset it to default values.
+            Bootstrap DNS servers, port is optional after colon.
           'items':
             'type': 'string'
           'example':
@@ -1521,18 +1566,25 @@
         'upstream_dns':
           'type': 'array'
           'description': >
-            Upstream servers, port is optional after colon.  Empty value will
-            reset it to default values.
+            Upstream DNS servers, port is optional after colon.
           'items':
             'type': 'string'
           'example':
           - 'tls://1.1.1.1'
           - 'tls://1.0.0.1'
+        'fallback_dns':
+          'type': 'array'
+          'description': >
+            Fallback DNS servers, port is optional after colon.
+          'items':
+            'type': 'string'
+          'example':
+          - '8.8.8.8'
+          - '1.1.1.1:53'
         'private_upstream':
           'type': 'array'
           'description': >
-            Local PTR resolvers, port is optional after colon.  Empty value will
-            reset it to default values.
+            Local PTR resolvers, port is optional after colon.
           'items':
             'type': 'string'
           'example':
@@ -2416,6 +2468,11 @@
           'example': true
           'description': >
             Set to true if both certificate and private key are correct.
+        'serve_plain_dns':
+          'type': 'boolean'
+          'example': true
+          'description': >
+            Set to true if plain DNS is allowed for incoming requests.
     'NetInterface':
       'type': 'object'
       'description': 'Network interface info'
@@ -2639,6 +2696,25 @@
 
             This behaviour can be changed in the future versions.
           'type': 'boolean'
+        'upstreams_cache_enabled':
+          'description': |
+            NOTE: If `upstreams_cache_enabled` is not set in HTTP API
+            `GET /clients/add` request then default value (false) will be used.
+
+            If `upstreams_cache_enabled` is not set in HTTP API
+            `GET /clients/update` request then the existing value will not be
+            changed.
+
+            This behaviour can be changed in the future versions.
+          'type': 'boolean'
+        'upstreams_cache_size':
+          'description': |
+            NOTE: If `upstreams_cache_enabled` is not set in HTTP API
+            `GET /clients/update` request then the existing value will not be
+            changed.
+
+            This behaviour can be changed in the future versions.
+          'type': 'integer'
     'ClientAuto':
       'type': 'object'
       'description': 'Auto-Client information'

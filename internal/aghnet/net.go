@@ -9,11 +9,15 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
+	"strings"
 	"syscall"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
+	"github.com/AdguardTeam/golibs/osutil"
 )
 
 // DialContextFunc is the semantic alias for dialing functions, such as
@@ -29,7 +33,7 @@ var (
 	netInterfaceAddrs = net.InterfaceAddrs
 
 	// rootDirFS is the filesystem pointing to the root directory.
-	rootDirFS = aghos.RootDirFS()
+	rootDirFS = osutil.RootDirFS()
 )
 
 // ErrNoStaticIPInfo is returned by IfaceHasStaticIP when no information about
@@ -263,7 +267,7 @@ func IsAddrInUse(err error) (ok bool) {
 
 // CollectAllIfacesAddrs returns the slice of all network interfaces IP
 // addresses without port number.
-func CollectAllIfacesAddrs() (addrs []string, err error) {
+func CollectAllIfacesAddrs() (addrs []netip.Addr, err error) {
 	var ifaceAddrs []net.Addr
 	ifaceAddrs, err = netInterfaceAddrs()
 	if err != nil {
@@ -271,17 +275,83 @@ func CollectAllIfacesAddrs() (addrs []string, err error) {
 	}
 
 	for _, addr := range ifaceAddrs {
-		cidr := addr.String()
-		var ip net.IP
-		ip, _, err = net.ParseCIDR(cidr)
+		var p netip.Prefix
+		p, err = netip.ParsePrefix(addr.String())
 		if err != nil {
-			return nil, fmt.Errorf("parsing cidr: %w", err)
+			// Don't wrap the error since it's informative enough as is.
+			return nil, err
 		}
 
-		addrs = append(addrs, ip.String())
+		addrs = append(addrs, p.Addr())
 	}
 
 	return addrs, nil
+}
+
+// ParseAddrPort parses an [netip.AddrPort] from s, which should be either a
+// valid IP, optionally with port, or a valid URL with plain IP address.  The
+// defaultPort is used if s doesn't contain port number.
+func ParseAddrPort(s string, defaultPort uint16) (ipp netip.AddrPort, err error) {
+	u, err := url.Parse(s)
+	if err == nil && u.Host != "" {
+		s = u.Host
+	}
+
+	ipp, err = netip.ParseAddrPort(s)
+	if err != nil {
+		ip, parseErr := netip.ParseAddr(s)
+		if parseErr != nil {
+			return ipp, errors.Join(err, parseErr)
+		}
+
+		return netip.AddrPortFrom(ip, defaultPort), nil
+	}
+
+	return ipp, nil
+}
+
+// ParseSubnet parses s either as a CIDR prefix itself, or as an IP address,
+// returning the corresponding single-IP CIDR prefix.
+//
+// TODO(e.burkov):  Taken from dnsproxy, move to golibs.
+func ParseSubnet(s string) (p netip.Prefix, err error) {
+	if strings.Contains(s, "/") {
+		p, err = netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+	} else {
+		var ip netip.Addr
+		ip, err = netip.ParseAddr(s)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+
+		p = netip.PrefixFrom(ip, ip.BitLen())
+	}
+
+	return p, nil
+}
+
+// ParseBootstraps returns the slice of upstream resolvers parsed from addrs.
+// It additionally returns the closers for each resolver, that should be closed
+// after use.
+func ParseBootstraps(
+	addrs []string,
+	opts *upstream.Options,
+) (boots []*upstream.UpstreamResolver, err error) {
+	boots = make([]*upstream.UpstreamResolver, 0, len(boots))
+	for i, b := range addrs {
+		var r *upstream.UpstreamResolver
+		r, err = upstream.NewUpstreamResolver(b, opts)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap at index %d: %w", i, err)
+		}
+
+		boots = append(boots, r)
+	}
+
+	return boots, nil
 }
 
 // BroadcastFromPref calculates the broadcast IP address for p.

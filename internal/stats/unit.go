@@ -5,14 +5,14 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
+	"slices"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
-	"github.com/AdguardTeam/golibs/stringutil"
 	"go.etcd.io/bbolt"
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 const (
@@ -68,11 +68,15 @@ type Entry struct {
 	// Result is the result of processing the request.
 	Result Result
 
-	// Time is the duration of the request processing.
-	Time time.Duration
+	// ProcessingTime is the duration of the request processing from the start
+	// of the request including timeouts.
+	ProcessingTime time.Duration
+
+	// UpstreamTime is the duration of the successful request to the upstream.
+	UpstreamTime time.Duration
 }
 
-// validate returs an error if entry is not valid.
+// validate returns an error if entry is not valid.
 func (e *Entry) validate() (err error) {
 	switch {
 	case e.Result == 0:
@@ -103,8 +107,8 @@ type unit struct {
 	// upstreamsResponses stores the number of responses from each upstream.
 	upstreamsResponses map[string]uint64
 
-	// upstreamsTimeSum stores the sum of processing time in microseconds of
-	// responses from each upstream.
+	// upstreamsTimeSum stores the sum of durations of successful queries in
+	// microseconds to each upstream.
 	upstreamsTimeSum map[string]uint64
 
 	// nResult stores the number of requests grouped by it's result.
@@ -295,7 +299,7 @@ func loadUnitFromDB(tx *bbolt.Tx, id uint32) (udb *unitDB) {
 	return udb
 }
 
-// deserealize assigns the appropriate values from udb to u.  u must not be nil.
+// deserialize assigns the appropriate values from udb to u.  u must not be nil.
 // It's safe for concurrent use.
 func (u *unit) deserialize(udb *unitDB) {
 	if udb == nil {
@@ -323,13 +327,14 @@ func (u *unit) add(e *Entry) {
 	}
 
 	u.clients[e.Client]++
-	t := uint64(e.Time.Microseconds())
-	u.timeSum += t
+	pt := uint64(e.ProcessingTime.Microseconds())
+	u.timeSum += pt
 	u.nTotal++
 
 	if e.Upstream != "" {
 		u.upstreamsResponses[e.Upstream]++
-		u.upstreamsTimeSum[e.Upstream] += t
+		ut := uint64(e.UpstreamTime.Microseconds())
+		u.upstreamsTimeSum[e.Upstream] += ut
 	}
 }
 
@@ -370,7 +375,7 @@ type pairsGetter func(u *unitDB) (pairs []countPair)
 
 // topsCollector collects statistics about highest values from the given *unitDB
 // slice using pg to retrieve data.
-func topsCollector(units []*unitDB, max int, ignored *stringutil.Set, pg pairsGetter) []map[string]uint64 {
+func topsCollector(units []*unitDB, max int, ignored *aghnet.IgnoreEngine, pg pairsGetter) []map[string]uint64 {
 	m := map[string]uint64{}
 	for _, u := range units {
 		for _, cp := range pg(u) {
@@ -505,6 +510,10 @@ func (s *StatsCtx) fillCollectedStats(data *StatsResp, units []*unitDB, curID ui
 
 // fillCollectedStatsDaily fills data with collected daily statistics.  units
 // must contain data for the count of days.
+//
+// TODO(s.chzhen):  Improve collection of statistics for frontend.  Dashboard
+// cards should contain statistics for the whole interval without rounding to
+// days.
 func (s *StatsCtx) fillCollectedStatsDaily(
 	data *StatsResp,
 	units []*unitDB,

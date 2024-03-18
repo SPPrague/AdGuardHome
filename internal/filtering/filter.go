@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +16,6 @@ import (
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/stringutil"
-	"golang.org/x/exp/slices"
 )
 
 // filterDir is the subdirectory of a data directory to store downloaded
@@ -91,12 +91,12 @@ func (d *DNSFilter) filterSetProperties(
 	newList FilterYAML,
 	isAllowlist bool,
 ) (shouldRestart bool, err error) {
-	d.filtersMu.Lock()
-	defer d.filtersMu.Unlock()
+	d.conf.filtersMu.Lock()
+	defer d.conf.filtersMu.Unlock()
 
-	filters := d.Filters
+	filters := d.conf.Filters
 	if isAllowlist {
-		filters = d.WhitelistFilters
+		filters = d.conf.WhitelistFilters
 	}
 
 	i := slices.IndexFunc(filters, func(flt FilterYAML) bool { return flt.URL == listURL })
@@ -162,8 +162,8 @@ func (d *DNSFilter) filterSetProperties(
 // filterExists returns true if a filter with the same url exists in d.  It's
 // safe for concurrent use.
 func (d *DNSFilter) filterExists(url string) (ok bool) {
-	d.filtersMu.RLock()
-	defer d.filtersMu.RUnlock()
+	d.conf.filtersMu.RLock()
+	defer d.conf.filtersMu.RUnlock()
 
 	r := d.filterExistsLocked(url)
 
@@ -173,13 +173,13 @@ func (d *DNSFilter) filterExists(url string) (ok bool) {
 // filterExistsLocked returns true if d contains the filter with the same url.
 // d.filtersMu is expected to be locked.
 func (d *DNSFilter) filterExistsLocked(url string) (ok bool) {
-	for _, f := range d.Filters {
+	for _, f := range d.conf.Filters {
 		if f.URL == url {
 			return true
 		}
 	}
 
-	for _, f := range d.WhitelistFilters {
+	for _, f := range d.conf.WhitelistFilters {
 		if f.URL == url {
 			return true
 		}
@@ -194,8 +194,8 @@ func (d *DNSFilter) filterAdd(flt FilterYAML) (err error) {
 	// Defer annotating to unlock sooner.
 	defer func() { err = errors.Annotate(err, "adding filter: %w") }()
 
-	d.filtersMu.Lock()
-	defer d.filtersMu.Unlock()
+	d.conf.filtersMu.Lock()
+	defer d.conf.filtersMu.Unlock()
 
 	// Check for duplicates.
 	if d.filterExistsLocked(flt.URL) {
@@ -203,9 +203,9 @@ func (d *DNSFilter) filterAdd(flt FilterYAML) (err error) {
 	}
 
 	if flt.white {
-		d.WhitelistFilters = append(d.WhitelistFilters, flt)
+		d.conf.WhitelistFilters = append(d.conf.WhitelistFilters, flt)
 	} else {
-		d.Filters = append(d.Filters, flt)
+		d.conf.Filters = append(d.conf.Filters, flt)
 	}
 
 	return nil
@@ -263,30 +263,6 @@ func assignUniqueFilterID() int64 {
 	return value
 }
 
-// Sets up a timer that will be checking for filters updates periodically
-func (d *DNSFilter) periodicallyRefreshFilters() {
-	const maxInterval = 1 * 60 * 60
-	ivl := 5 // use a dynamically increasing time interval
-	for {
-		isNetErr, ok := false, false
-		if d.FiltersUpdateIntervalHours != 0 {
-			_, isNetErr, ok = d.tryRefreshFilters(true, true, false)
-			if ok && !isNetErr {
-				ivl = maxInterval
-			}
-		}
-
-		if isNetErr {
-			ivl *= 2
-			if ivl > maxInterval {
-				ivl = maxInterval
-			}
-		}
-
-		time.Sleep(time.Duration(ivl) * time.Second)
-	}
-}
-
 // tryRefreshFilters is like [refreshFilters], but backs down if the update is
 // already going on.
 //
@@ -307,8 +283,8 @@ func (d *DNSFilter) tryRefreshFilters(block, allow, force bool) (updated int, is
 func (d *DNSFilter) listsToUpdate(filters *[]FilterYAML, force bool) (toUpd []FilterYAML) {
 	now := time.Now()
 
-	d.filtersMu.RLock()
-	defer d.filtersMu.RUnlock()
+	d.conf.filtersMu.RLock()
+	defer d.conf.filtersMu.RUnlock()
 
 	for i := range *filters {
 		flt := &(*filters)[i] // otherwise we will be operating on a copy
@@ -318,7 +294,7 @@ func (d *DNSFilter) listsToUpdate(filters *[]FilterYAML, force bool) (toUpd []Fi
 		}
 
 		if !force {
-			exp := flt.LastUpdated.Add(time.Duration(d.FiltersUpdateIntervalHours) * time.Hour)
+			exp := flt.LastUpdated.Add(time.Duration(d.conf.FiltersUpdateIntervalHours) * time.Hour)
 			if now.Before(exp) {
 				continue
 			}
@@ -364,8 +340,8 @@ func (d *DNSFilter) refreshFiltersArray(filters *[]FilterYAML, force bool) (int,
 
 	updateCount := 0
 
-	d.filtersMu.Lock()
-	defer d.filtersMu.Unlock()
+	d.conf.filtersMu.Lock()
+	defer d.conf.filtersMu.Unlock()
 
 	for i := range updateFilters {
 		uf := &updateFilters[i]
@@ -427,10 +403,10 @@ func (d *DNSFilter) refreshFiltersIntl(block, allow, force bool) (int, bool) {
 	isNetErr := false
 
 	if block {
-		updNum, lists, toUpd, isNetErr = d.refreshFiltersArray(&d.Filters, force)
+		updNum, lists, toUpd, isNetErr = d.refreshFiltersArray(&d.conf.Filters, force)
 	}
 	if allow {
-		updNumAl, listsAl, toUpdAl, isNetErrAl := d.refreshFiltersArray(&d.WhitelistFilters, force)
+		updNumAl, listsAl, toUpdAl, isNetErrAl := d.refreshFiltersArray(&d.conf.WhitelistFilters, force)
 
 		updNum += updNumAl
 		lists = append(lists, listsAl...)
@@ -451,7 +427,7 @@ func (d *DNSFilter) refreshFiltersIntl(block, allow, force bool) (int, bool) {
 				continue
 			}
 
-			p := uf.Path(d.DataDir)
+			p := uf.Path(d.conf.DataDir)
 			err := os.Remove(p + ".old")
 			if err != nil {
 				log.Debug("filtering: removing old filter file %q: %s", p, err)
@@ -468,7 +444,7 @@ func (d *DNSFilter) update(filter *FilterYAML) (b bool, err error) {
 	filter.LastUpdated = time.Now()
 	if !b {
 		chErr := os.Chtimes(
-			filter.Path(d.DataDir),
+			filter.Path(d.conf.DataDir),
 			filter.LastUpdated,
 			filter.LastUpdated,
 		)
@@ -491,7 +467,7 @@ func (d *DNSFilter) updateIntl(flt *FilterYAML) (ok bool, err error) {
 	// users.
 	//
 	// See https://github.com/AdguardTeam/AdGuardHome/issues/3198.
-	tmpFile, err := aghrenameio.NewPendingFile(flt.Path(d.DataDir), 0o644)
+	tmpFile, err := aghrenameio.NewPendingFile(flt.Path(d.conf.DataDir), 0o644)
 	if err != nil {
 		return false, err
 	}
@@ -504,7 +480,7 @@ func (d *DNSFilter) updateIntl(flt *FilterYAML) (ok bool, err error) {
 	}
 	defer func() { err = errors.WithDeferred(err, r.Close()) }()
 
-	bufPtr := d.bufPool.Get().(*[]byte)
+	bufPtr := d.bufPool.Get()
 	defer d.bufPool.Put(bufPtr)
 
 	p := rulelist.NewParser()
@@ -532,7 +508,7 @@ func (d *DNSFilter) finalizeUpdate(
 		return errors.WithDeferred(returned, file.Cleanup())
 	}
 
-	log.Info("filtering: saving contents of filter %d into %q", id, flt.Path(d.DataDir))
+	log.Info("filtering: saving contents of filter %d into %q", id, flt.Path(d.conf.DataDir))
 
 	err = file.CloseReplace()
 	if err != nil {
@@ -572,7 +548,7 @@ func (d *DNSFilter) reader(fltURL string) (r io.ReadCloser, err error) {
 // readerFromURL returns an io.ReadCloser reading filtering-rule list data form
 // the filter's URL.
 func (d *DNSFilter) readerFromURL(fltURL string) (r io.ReadCloser, err error) {
-	resp, err := d.HTTPClient.Get(fltURL)
+	resp, err := d.conf.HTTPClient.Get(fltURL)
 	if err != nil {
 		// Don't wrap the error since it's informative enough as is.
 		return nil, err
@@ -587,7 +563,7 @@ func (d *DNSFilter) readerFromURL(fltURL string) (r io.ReadCloser, err error) {
 
 // loads filter contents from the file in dataDir
 func (d *DNSFilter) load(flt *FilterYAML) (err error) {
-	fileName := flt.Path(d.DataDir)
+	fileName := flt.Path(d.conf.DataDir)
 
 	log.Debug("filtering: loading filter %d from %q", flt.ID, fileName)
 
@@ -607,7 +583,7 @@ func (d *DNSFilter) load(flt *FilterYAML) (err error) {
 
 	log.Debug("filtering: file %q, id %d, length %d", fileName, flt.ID, st.Size())
 
-	bufPtr := d.bufPool.Get().(*[]byte)
+	bufPtr := d.bufPool.Get()
 	defer d.bufPool.Put(bufPtr)
 
 	p := rulelist.NewParser()
@@ -623,39 +599,39 @@ func (d *DNSFilter) load(flt *FilterYAML) (err error) {
 }
 
 func (d *DNSFilter) EnableFilters(async bool) {
-	d.filtersMu.RLock()
-	defer d.filtersMu.RUnlock()
+	d.conf.filtersMu.RLock()
+	defer d.conf.filtersMu.RUnlock()
 
 	d.enableFiltersLocked(async)
 }
 
 func (d *DNSFilter) enableFiltersLocked(async bool) {
-	filters := make([]Filter, 1, len(d.Filters)+len(d.WhitelistFilters)+1)
+	filters := make([]Filter, 1, len(d.conf.Filters)+len(d.conf.WhitelistFilters)+1)
 	filters[0] = Filter{
-		ID:   CustomListID,
-		Data: []byte(strings.Join(d.UserRules, "\n")),
+		ID:   rulelist.URLFilterIDCustom,
+		Data: []byte(strings.Join(d.conf.UserRules, "\n")),
 	}
 
-	for _, filter := range d.Filters {
+	for _, filter := range d.conf.Filters {
 		if !filter.Enabled {
 			continue
 		}
 
 		filters = append(filters, Filter{
 			ID:       filter.ID,
-			FilePath: filter.Path(d.DataDir),
+			FilePath: filter.Path(d.conf.DataDir),
 		})
 	}
 
 	var allowFilters []Filter
-	for _, filter := range d.WhitelistFilters {
+	for _, filter := range d.conf.WhitelistFilters {
 		if !filter.Enabled {
 			continue
 		}
 
 		allowFilters = append(allowFilters, Filter{
 			ID:       filter.ID,
-			FilePath: filter.Path(d.DataDir),
+			FilePath: filter.Path(d.conf.DataDir),
 		})
 	}
 
@@ -664,5 +640,5 @@ func (d *DNSFilter) enableFiltersLocked(async bool) {
 		log.Error("filtering: enabling filters: %s", err)
 	}
 
-	d.SetEnabled(d.FilteringEnabled)
+	d.SetEnabled(d.conf.FilteringEnabled)
 }

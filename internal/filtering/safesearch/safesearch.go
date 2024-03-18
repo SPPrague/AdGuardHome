@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
+	"github.com/AdguardTeam/AdGuardHome/internal/filtering/rulelist"
 	"github.com/AdguardTeam/golibs/cache"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/urlfilter"
@@ -98,7 +99,7 @@ func NewDefault(
 		cacheTTL:  cacheTTL,
 	}
 
-	err = ss.resetEngine(filtering.SafeSearchListID, conf)
+	err = ss.resetEngine(rulelist.URLFilterIDSafeSearch, conf)
 	if err != nil {
 		// Don't wrap the error, because it's informative enough as is.
 		return nil, err
@@ -226,14 +227,15 @@ func (ss *Default) searchHost(host string, qtype rules.RRType) (res *rules.DNSRe
 // empty result is converted into a NODATA response.
 //
 // TODO(a.garipov): Use the main rewrite result mechanism used in
-// [dnsforward.Server.filterDNSRequest].
+// [dnsforward.Server.filterDNSRequest].  Now we resolve IPs for CNAME to save
+// them in the safe search cache.
 func (ss *Default) newResult(
 	rewrite *rules.DNSRewrite,
 	qtype rules.RRType,
 ) (res *filtering.Result, err error) {
 	res = &filtering.Result{
 		Rules: []*filtering.ResultRule{{
-			FilterListID: filtering.SafeSearchListID,
+			FilterListID: rulelist.URLFilterIDSafeSearch,
 		}},
 		Reason:     filtering.FilteredSafeSearch,
 		IsFiltered: true,
@@ -254,6 +256,8 @@ func (ss *Default) newResult(
 	if host == "" {
 		return res, nil
 	}
+
+	res.CanonName = host
 
 	ss.log(log.DEBUG, "resolving %q", host)
 
@@ -365,7 +369,7 @@ func (ss *Default) Update(conf filtering.SafeSearchConfig) (err error) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 
-	err = ss.resetEngine(filtering.SafeSearchListID, conf)
+	err = ss.resetEngine(rulelist.URLFilterIDSafeSearch, conf)
 	if err != nil {
 		// Don't wrap the error, because it's informative enough as is.
 		return err

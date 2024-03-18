@@ -201,7 +201,7 @@ opinion, this cannot be legitimately counted as a Pi-Hole's feature.
 | Cross-platform                                                          | ✅                | ❌ (not natively, only via Docker)                        |
 | Running as a DNS-over-HTTPS or DNS-over-TLS server                      | ✅                | ❌ (requires additional software)                         |
 | Blocking phishing and malware domains                                   | ✅                | ❌ (requires non-default blocklists)                      |
-| Parental control (blocking adult domains)                               | ✅                | ❌                                                        |
+| Parental control (blocking adult domains)                               | ✅                | ❌ (requires non-default blocklists)                      |
 | Force Safe search on search engines                                     | ✅                | ❌                                                        |
 | Per-client (device) configuration                                       | ✅                | ✅                                                        |
 | Access settings (choose who can use AGH DNS)                            | ✅                | ❌                                                        |
@@ -262,8 +262,8 @@ Run `make init` to prepare the development environment.
 You will need this to build AdGuard Home:
 
  *  [Go](https://golang.org/dl/) v1.20 or later;
- *  [Node.js](https://nodejs.org/en/download/) v10.16.2 or later;
- *  [npm](https://www.npmjs.com/) v6.14 or later;
+ *  [Node.js](https://nodejs.org/en/download/) v16 or later;
+ *  [npm](https://www.npmjs.com/) v8 or later;
  *  [yarn](https://yarnpkg.com/) v1.22.5 or later.
 
 
@@ -276,6 +276,15 @@ Open your terminal and execute these commands:
 git clone https://github.com/AdguardTeam/AdGuardHome
 cd AdGuardHome
 make
+```
+
+  #### <a href="#building-node" id="building-node" name="building-node">Building with Node.js 17 and later</a>
+
+In order to build AdGuard Home with Node.js 17 and later, specify
+`--openssl-legacy-provider` option.
+
+```sh
+export NODE_OPTIONS=--openssl-legacy-provider
 ```
 
 **NOTE:**  The non-standard `-j` flag is currently not supported, so building
@@ -409,6 +418,7 @@ There are three options how you can install an unstable version:
     ```sh
     curl -s -S -L https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh | sh -s -- -c edge
     ```
+
 [wiki-platf]: https://github.com/AdguardTeam/AdGuardHome/wiki/Platforms
 
 
@@ -463,9 +473,8 @@ bug or implementing the feature.
     [@kongfl888](https://github.com/kongfl888) (originally by
     [@rufengsuixing](https://github.com/rufengsuixing)).
 
- *  [Prometheus exporter for AdGuard
-    Home](https://github.com/ebrianne/adguard-exporter) by
-    [@ebrianne](https://github.com/ebrianne).
+ *  [AdGuardHome sync](https://github.com/bakito/adguardhome-sync) by
+    [@bakito](https://github.com/bakito).
 
  *  [Terminal-based, real-time traffic monitoring and statistics for your AdGuard Home
     instance](https://github.com/Lissy93/AdGuardian-Term) by
@@ -485,7 +494,8 @@ bug or implementing the feature.
  *  [Node.js library](https://github.com/Andrea055/AdguardHomeAPI) by
     [@Andrea055](https://github.com/Andrea055/).
 
-
+ *  [Browser Extension](https://github.com/satheshshiva/Adguard-Home-Browser-Ext) by
+    [@satheshshiva](https://github.com/satheshshiva/).
 
 ## <a href="#acknowledgments" id="acknowledgments" name="acknowledgments">Acknowledgments</a>
 

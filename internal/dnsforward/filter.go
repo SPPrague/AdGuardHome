@@ -4,15 +4,15 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/golibs/log"
-	"github.com/AdguardTeam/golibs/netutil"
+	"github.com/AdguardTeam/urlfilter/rules"
 	"github.com/miekg/dns"
-	"golang.org/x/exp/slices"
 )
 
 // beforeRequestHandler is the handler that is called before any other
@@ -27,8 +27,7 @@ func (s *Server) beforeRequestHandler(
 		return false, fmt.Errorf("getting clientid: %w", err)
 	}
 
-	addrPort := netutil.NetAddrToAddrPort(pctx.Addr)
-	blocked, _ := s.IsBlockedClient(addrPort.Addr(), clientID)
+	blocked, _ := s.IsBlockedClient(pctx.Addr.Addr(), clientID)
 	if blocked {
 		return s.preBlockedResponse(pctx)
 	}
@@ -59,8 +58,7 @@ func (s *Server) clientRequestFilteringSettings(dctx *dnsContext) (setts *filter
 	setts = s.dnsFilter.Settings()
 	setts.ProtectionEnabled = dctx.protectionEnabled
 	if s.conf.FilterHandler != nil {
-		addrPort := netutil.NetAddrToAddrPort(dctx.proxyCtx.Addr)
-		s.conf.FilterHandler(addrPort.Addr(), dctx.clientID, setts)
+		s.conf.FilterHandler(dctx.proxyCtx.Addr.Addr(), dctx.clientID, setts)
 	}
 
 	return setts
@@ -97,7 +95,7 @@ func (s *Server) filterDNSRequest(dctx *dnsContext) (res *filtering.Result, err 
 		dctx.origQuestion = q
 		req.Question[0].Name = dns.Fqdn(res.CanonName)
 	case res.Reason == filtering.Rewritten:
-		pctx.Res = s.filterRewritten(req, host, res, q.Qtype)
+		pctx.Res = s.getCNAMEWithIPs(req, res.IPList, res.CanonName)
 	case res.Reason.In(filtering.RewrittenRule, filtering.RewrittenAutoHosts):
 		if err = s.filterDNSRewrite(req, res, pctx); err != nil {
 			return nil, err
@@ -107,48 +105,17 @@ func (s *Server) filterDNSRequest(dctx *dnsContext) (res *filtering.Result, err 
 	return res, err
 }
 
-// filterRewritten handles DNS rewrite filters.  It returns a DNS response with
-// the data from the filtering result.  All parameters must not be nil.
-func (s *Server) filterRewritten(
-	req *dns.Msg,
-	host string,
-	res *filtering.Result,
-	qt uint16,
-) (resp *dns.Msg) {
-	resp = s.makeResponse(req)
-	name := host
-	if len(res.CanonName) != 0 {
-		resp.Answer = append(resp.Answer, s.genAnswerCNAME(req, res.CanonName))
-		name = res.CanonName
-	}
-
-	for _, ip := range res.IPList {
-		switch qt {
-		case dns.TypeA:
-			a := s.genAnswerA(req, ip)
-			a.Hdr.Name = dns.Fqdn(name)
-			resp.Answer = append(resp.Answer, a)
-		case dns.TypeAAAA:
-			a := s.genAnswerAAAA(req, ip)
-			a.Hdr.Name = dns.Fqdn(name)
-			resp.Answer = append(resp.Answer, a)
-		}
-	}
-
-	return resp
-}
-
 // checkHostRules checks the host against filters.  It is safe for concurrent
 // use.
-func (s *Server) checkHostRules(host string, rrtype uint16, setts *filtering.Settings) (
-	r *filtering.Result,
-	err error,
-) {
+func (s *Server) checkHostRules(
+	host string,
+	rrtype rules.RRType,
+	setts *filtering.Settings,
+) (r *filtering.Result, err error) {
 	s.serverLock.RLock()
 	defer s.serverLock.RUnlock()
 
-	var res filtering.Result
-	res, err = s.dnsFilter.CheckHostRules(host, rrtype, setts)
+	res, err := s.dnsFilter.CheckHostRules(host, rrtype, setts)
 	if err != nil {
 		return nil, err
 	}
@@ -156,20 +123,21 @@ func (s *Server) checkHostRules(host string, rrtype uint16, setts *filtering.Set
 	return &res, err
 }
 
-// filterDNSResponse checks each resource record of the response's answer
-// section from pctx and returns a non-nil res if at least one of canonical
-// names or IP addresses in it matches the filtering rules.
-func (s *Server) filterDNSResponse(
-	pctx *proxy.DNSContext,
-	setts *filtering.Settings,
-) (res *filtering.Result, err error) {
+// filterDNSResponse checks each resource record of answer section of
+// dctx.proxyCtx.Res.  It sets dctx.result and dctx.origResp if at least one of
+// canonical names, IP addresses, or HTTPS RR hints in it matches the filtering
+// rules, as well as sets dctx.proxyCtx.Res to the filtered response.
+func (s *Server) filterDNSResponse(dctx *dnsContext) (err error) {
+	setts := dctx.setts
 	if !setts.FilteringEnabled {
-		return nil, nil
+		return nil
 	}
 
-	for _, a := range pctx.Res.Answer {
+	var res *filtering.Result
+	pctx := dctx.proxyCtx
+	for i, a := range pctx.Res.Answer {
 		host := ""
-		var rrtype uint16
+		var rrtype rules.RRType
 		switch a := a.(type) {
 		case *dns.CNAME:
 			host = strings.TrimSuffix(a.Target, ".")
@@ -195,18 +163,19 @@ func (s *Server) filterDNSResponse(
 		log.Debug("dnsforward: checked %s %s for %s", dns.Type(rrtype), host, a.Header().Name)
 
 		if err != nil {
-			return nil, err
-		} else if res == nil {
-			continue
-		} else if res.IsFiltered {
+			return fmt.Errorf("filtering answer at index %d: %w", i, err)
+		} else if res != nil && res.IsFiltered {
+			dctx.result = res
+			dctx.origResp = pctx.Res
 			pctx.Res = s.genDNSFilterMessage(pctx, res)
+
 			log.Debug("dnsforward: matched %q by response: %q", pctx.Req.Question[0].Name, host)
 
-			return res, nil
+			break
 		}
 	}
 
-	return nil, nil
+	return nil
 }
 
 // removeIPv6Hints deletes IPv6 hints from RR values.

@@ -3,11 +3,11 @@ package querylog
 import (
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
-	"golang.org/x/exp/slices"
 )
 
 // client finds the client info, if any, by its ClientID and IP address,
@@ -47,17 +47,23 @@ func (l *queryLog) client(clientID, ip string, cache clientCache) (c *Client, er
 // searchMemory looks up log records which are currently in the in-memory
 // buffer.  It optionally uses the client cache, if provided.  It also returns
 // the total amount of records in the buffer at the moment of searching.
+// l.confMu is expected to be locked.
 func (l *queryLog) searchMemory(params *searchParams, cache clientCache) (entries []*logEntry, total int) {
+	// Check memory size, as the buffer can contain a single log record.  See
+	// [newQueryLog].
+	if l.conf.MemSize == 0 {
+		return nil, 0
+	}
+
 	l.bufferLock.Lock()
 	defer l.bufferLock.Unlock()
 
-	// Go through the buffer in the reverse order, from newer to older.
-	var err error
-	for i := len(l.buffer) - 1; i >= 0; i-- {
+	l.buffer.ReverseRange(func(entry *logEntry) (cont bool) {
 		// A shallow clone is enough, since the only thing that this loop
 		// modifies is the client field.
-		e := l.buffer[i].shallowClone()
+		e := entry.shallowClone()
 
+		var err error
 		e.client, err = l.client(e.ClientID, e.IP.String(), cache)
 		if err != nil {
 			msg := "querylog: enriching memory record at time %s" +
@@ -70,13 +76,16 @@ func (l *queryLog) searchMemory(params *searchParams, cache clientCache) (entrie
 		if params.match(e) {
 			entries = append(entries, e)
 		}
-	}
 
-	return entries, len(l.buffer)
+		return true
+	})
+
+	return entries, int(l.buffer.Len())
 }
 
-// search - searches log entries in the query log using specified parameters
-// returns the list of entries found + time of the oldest entry
+// search searches log entries in memory buffer and log file using specified
+// parameters and returns the list of entries found and the time of the oldest
+// entry.  l.confMu is expected to be locked.
 func (l *queryLog) search(params *searchParams) (entries []*logEntry, oldest time.Time) {
 	start := time.Now()
 
@@ -177,7 +186,7 @@ func (l *queryLog) setQLogReader(olderThan time.Time) (qr *qLogReader, err error
 	return r, nil
 }
 
-// readEntries reads entries from the reader to totalLimit.   By default, we do
+// readEntries reads entries from the reader to totalLimit.  By default, we do
 // not scan more than maxFileScanEntries at once.  The idea is to make search
 // calls faster so that the UI could handle it and show something quicker.
 // This behavior can be overridden if maxFileScanEntries is set to 0.

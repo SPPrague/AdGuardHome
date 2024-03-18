@@ -3,7 +3,7 @@
 # This comment is used to simplify checking local copies of the script.  Bump
 # this number every time a significant change is made to this script.
 #
-# AdGuard-Project-Version: 2
+# AdGuard-Project-Version: 3
 
 verbose="${VERBOSE:-0}"
 readonly verbose
@@ -29,8 +29,6 @@ set -e -f -u
 
 go="${GO:-go}"
 readonly go
-
-# TODO(a.garipov): Add goconst?
 
 # Remove only the actual binaries in the bin/ directory, as developers may add
 # their own scripts there.  Most commonly, a script named “go” for tools that
