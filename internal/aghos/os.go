@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -19,25 +20,16 @@ import (
 	"github.com/AdguardTeam/golibs/log"
 )
 
-// UnsupportedError is returned by functions and methods when a particular
-// operation Op cannot be performed on the current OS.
-type UnsupportedError struct {
-	Op string
-	OS string
-}
+// Default file, binary, and directory permissions.
+const (
+	DefaultPermDir  fs.FileMode = 0o700
+	DefaultPermExe  fs.FileMode = 0o700
+	DefaultPermFile fs.FileMode = 0o600
+)
 
-// Error implements the error interface for *UnsupportedError.
-func (err *UnsupportedError) Error() (msg string) {
-	return fmt.Sprintf("%s is unsupported on %s", err.Op, err.OS)
-}
-
-// Unsupported is a helper that returns an *UnsupportedError with the Op field
-// set to op and the OS field set to the current OS.
+// Unsupported is a helper that returns a wrapped [errors.ErrUnsupported].
 func Unsupported(op string) (err error) {
-	return &UnsupportedError{
-		Op: op,
-		OS: runtime.GOOS,
-	}
+	return fmt.Errorf("%s: not supported on %s: %w", op, runtime.GOOS, errors.ErrUnsupported)
 }
 
 // SetRlimit sets user-specified limit of how many fd's we can use.
@@ -152,26 +144,6 @@ func parsePSOutput(r io.Reader, cmdName string, ignore []int) (largest, instNum 
 // IsOpenWrt returns true if host OS is OpenWrt.
 func IsOpenWrt() (ok bool) {
 	return isOpenWrt()
-}
-
-// NotifyReconfigureSignal notifies c on receiving reconfigure signals.
-func NotifyReconfigureSignal(c chan<- os.Signal) {
-	notifyReconfigureSignal(c)
-}
-
-// NotifyShutdownSignal notifies c on receiving shutdown signals.
-func NotifyShutdownSignal(c chan<- os.Signal) {
-	notifyShutdownSignal(c)
-}
-
-// IsReconfigureSignal returns true if sig is a reconfigure signal.
-func IsReconfigureSignal(sig os.Signal) (ok bool) {
-	return isReconfigureSignal(sig)
-}
-
-// IsShutdownSignal returns true if sig is a shutdown signal.
-func IsShutdownSignal(sig os.Signal) (ok bool) {
-	return isShutdownSignal(sig)
 }
 
 // SendShutdownSignal sends the shutdown signal to the channel.

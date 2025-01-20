@@ -11,18 +11,19 @@ import (
 
 // newIDIndex is a helper function that returns a client index filled with
 // persistent clients from the m.  It also generates a UID for each client.
-func newIDIndex(m []*Persistent) (ci *Index) {
-	ci = NewIndex()
+func newIDIndex(m []*Persistent) (ci *index) {
+	ci = newIndex()
 
 	for _, c := range m {
 		c.UID = MustNewUID()
-		ci.Add(c)
+		ci.add(c)
 	}
 
 	return ci
 }
 
-func TestClientIndex(t *testing.T) {
+// TODO(s.chzhen):  Remove.
+func TestClientIndex_Find(t *testing.T) {
 	const (
 		cliIPNone = "1.2.3.4"
 		cliIP1    = "1.1.1.1"
@@ -35,26 +36,49 @@ func TestClientIndex(t *testing.T) {
 
 		cliID  = "client-id"
 		cliMAC = "11:11:11:11:11:11"
+
+		linkLocalIP     = "fe80::abcd:abcd:abcd:ab%eth0"
+		linkLocalSubnet = "fe80::/16"
 	)
 
-	clients := []*Persistent{{
-		Name: "client1",
-		IPs: []netip.Addr{
-			netip.MustParseAddr(cliIP1),
-			netip.MustParseAddr(cliIPv6),
-		},
-	}, {
-		Name:    "client2",
-		IPs:     []netip.Addr{netip.MustParseAddr(cliIP2)},
-		Subnets: []netip.Prefix{netip.MustParsePrefix(cliSubnet)},
-	}, {
-		Name: "client_with_mac",
-		MACs: []net.HardwareAddr{mustParseMAC(cliMAC)},
-	}, {
-		Name:      "client_with_id",
-		ClientIDs: []string{cliID},
-	}}
+	var (
+		clientWithBothFams = &Persistent{
+			Name: "client1",
+			IPs: []netip.Addr{
+				netip.MustParseAddr(cliIP1),
+				netip.MustParseAddr(cliIPv6),
+			},
+		}
 
+		clientWithSubnet = &Persistent{
+			Name:    "client2",
+			IPs:     []netip.Addr{netip.MustParseAddr(cliIP2)},
+			Subnets: []netip.Prefix{netip.MustParsePrefix(cliSubnet)},
+		}
+
+		clientWithMAC = &Persistent{
+			Name: "client_with_mac",
+			MACs: []net.HardwareAddr{mustParseMAC(cliMAC)},
+		}
+
+		clientWithID = &Persistent{
+			Name:      "client_with_id",
+			ClientIDs: []string{cliID},
+		}
+
+		clientLinkLocal = &Persistent{
+			Name:    "client_link_local",
+			Subnets: []netip.Prefix{netip.MustParsePrefix(linkLocalSubnet)},
+		}
+	)
+
+	clients := []*Persistent{
+		clientWithBothFams,
+		clientWithSubnet,
+		clientWithMAC,
+		clientWithID,
+		clientLinkLocal,
+	}
 	ci := newIDIndex(clients)
 
 	testCases := []struct {
@@ -64,25 +88,29 @@ func TestClientIndex(t *testing.T) {
 	}{{
 		name: "ipv4_ipv6",
 		ids:  []string{cliIP1, cliIPv6},
-		want: clients[0],
+		want: clientWithBothFams,
 	}, {
 		name: "ipv4_subnet",
 		ids:  []string{cliIP2, cliSubnetIP},
-		want: clients[1],
+		want: clientWithSubnet,
 	}, {
 		name: "mac",
 		ids:  []string{cliMAC},
-		want: clients[2],
+		want: clientWithMAC,
 	}, {
 		name: "client_id",
 		ids:  []string{cliID},
-		want: clients[3],
+		want: clientWithID,
+	}, {
+		name: "client_link_local_subnet",
+		ids:  []string{linkLocalIP},
+		want: clientLinkLocal,
 	}}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, id := range tc.ids {
-				c, ok := ci.Find(id)
+				c, ok := ci.find(id)
 				require.True(t, ok)
 
 				assert.Equal(t, tc.want, c)
@@ -91,7 +119,7 @@ func TestClientIndex(t *testing.T) {
 	}
 
 	t.Run("not_found", func(t *testing.T) {
-		_, ok := ci.Find(cliIPNone)
+		_, ok := ci.find(cliIPNone)
 		assert.False(t, ok)
 	})
 }
@@ -143,11 +171,11 @@ func TestClientIndex_Clashes(t *testing.T) {
 			clone := tc.client.ShallowClone()
 			clone.UID = MustNewUID()
 
-			err := ci.Clashes(clone)
+			err := ci.clashes(clone)
 			require.Error(t, err)
 
-			ci.Delete(tc.client)
-			err = ci.Clashes(clone)
+			ci.remove(tc.client)
+			err = ci.clashes(clone)
 			require.NoError(t, err)
 		})
 	}
@@ -220,4 +248,104 @@ func TestMACToKey(t *testing.T) {
 		mac := net.HardwareAddr([]byte{1, 2, 3})
 		_ = macToKey(mac)
 	})
+}
+
+func TestIndex_FindByIPWithoutZone(t *testing.T) {
+	var (
+		ip         = netip.MustParseAddr("fe80::a098:7654:32ef:ff1")
+		ipWithZone = netip.MustParseAddr("fe80::1ff:fe23:4567:890a%eth2")
+	)
+
+	var (
+		clientNoZone = &Persistent{
+			Name: "client",
+			IPs:  []netip.Addr{ip},
+		}
+
+		clientWithZone = &Persistent{
+			Name: "client_with_zone",
+			IPs:  []netip.Addr{ipWithZone},
+		}
+	)
+
+	ci := newIDIndex([]*Persistent{
+		clientNoZone,
+		clientWithZone,
+	})
+
+	testCases := []struct {
+		ip   netip.Addr
+		want *Persistent
+		name string
+	}{{
+		name: "without_zone",
+		ip:   ip,
+		want: clientNoZone,
+	}, {
+		name: "with_zone",
+		ip:   ipWithZone,
+		want: clientWithZone,
+	}, {
+		name: "zero_address",
+		ip:   netip.Addr{},
+		want: nil,
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ci.findByIPWithoutZone(tc.ip.WithZone(""))
+			require.Equal(t, tc.want, c)
+		})
+	}
+}
+
+func TestClientIndex_RangeByName(t *testing.T) {
+	sortedClients := []*Persistent{{
+		Name:      "clientA",
+		ClientIDs: []string{"A"},
+	}, {
+		Name:      "clientB",
+		ClientIDs: []string{"B"},
+	}, {
+		Name:      "clientC",
+		ClientIDs: []string{"C"},
+	}, {
+		Name:      "clientD",
+		ClientIDs: []string{"D"},
+	}, {
+		Name:      "clientE",
+		ClientIDs: []string{"E"},
+	}}
+
+	testCases := []struct {
+		name string
+		want []*Persistent
+	}{{
+		name: "basic",
+		want: sortedClients,
+	}, {
+		name: "nil",
+		want: nil,
+	}, {
+		name: "one_element",
+		want: sortedClients[:1],
+	}, {
+		name: "two_elements",
+		want: sortedClients[:2],
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ci := newIDIndex(tc.want)
+
+			var got []*Persistent
+			ci.rangeByName(func(c *Persistent) (cont bool) {
+				got = append(got, c)
+
+				return true
+			})
+
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

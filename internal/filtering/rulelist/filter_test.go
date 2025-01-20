@@ -1,7 +1,6 @@
 package rulelist_test
 
 import (
-	"context"
 	"net/http"
 	"net/url"
 	"os"
@@ -9,14 +8,16 @@ import (
 	"testing"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering/rulelist"
+	"github.com/AdguardTeam/golibs/netutil/urlutil"
 	"github.com/AdguardTeam/golibs/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestFilter_Refresh(t *testing.T) {
+	t.Parallel()
+
 	cacheDir := t.TempDir()
-	uid := rulelist.MustNewUID()
 
 	const fltData = testRuleTextTitle + testRuleTextBlocked
 	fileURL, srvURL := newFilterLocations(t, cacheDir, fltData, fltData)
@@ -38,7 +39,7 @@ func TestFilter_Refresh(t *testing.T) {
 	}, {
 		name: "file",
 		url: &url.URL{
-			Scheme: "file",
+			Scheme: urlutil.SchemeFile,
 			Path:   fileURL.Path,
 		},
 		wantNewErrMsg: "",
@@ -50,6 +51,9 @@ func TestFilter_Refresh(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			uid := rulelist.MustNewUID()
 			f, err := rulelist.NewFilter(&rulelist.FilterConfig{
 				URL:         tc.url,
 				Name:        tc.name,
@@ -67,14 +71,12 @@ func TestFilter_Refresh(t *testing.T) {
 
 			require.NotNil(t, f)
 
-			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-			t.Cleanup(cancel)
-
 			buf := make([]byte, rulelist.DefaultRuleBufSize)
 			cli := &http.Client{
 				Timeout: testTimeout,
 			}
 
+			ctx := testutil.ContextWithTimeout(t, testTimeout)
 			res, err := f.Refresh(ctx, buf, cli, cacheDir, rulelist.DefaultMaxRuleListSize)
 			require.NoError(t, err)
 

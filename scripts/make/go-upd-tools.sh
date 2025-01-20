@@ -3,18 +3,16 @@
 # This comment is used to simplify checking local copies of the script.  Bump
 # this number every time a significant change is made to this script.
 #
-# AdGuard-Project-Version: 1
+# AdGuard-Project-Version: 3
 
 verbose="${VERBOSE:-0}"
 readonly verbose
 
-if [ "$verbose" -gt '1' ]
-then
+if [ "$verbose" -gt '1' ]; then
 	env
 	set -x
 	x_flags='-x=1'
-elif [ "$verbose" -gt '0' ]
-then
+elif [ "$verbose" -gt '0' ]; then
 	set -x
 	x_flags='-x=0'
 else
@@ -29,5 +27,6 @@ go="${GO:-go}"
 readonly go
 
 cd ./internal/tools/
-"$go" get -u
+
+"$go" get -u "$x_flags"
 "$go" mod tidy

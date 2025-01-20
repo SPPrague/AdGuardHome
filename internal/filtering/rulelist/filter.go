@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghrenameio"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/ioutil"
@@ -104,7 +105,7 @@ func NewFilter(c *FilterConfig) (f *Filter, err error) {
 // buffer used to parse information from the data.  cli and maxSize are only
 // used when f is a URL-based list.
 //
-// TODO(a.garipov): Unexport and test in an internal test or through enigne
+// TODO(a.garipov): Unexport and test in an internal test or through engine
 // tests.
 //
 // TODO(a.garipov): Consider not returning parseRes.
@@ -196,7 +197,7 @@ func (f *Filter) readFromHTTP(
 		return "", nil, fmt.Errorf("got status code %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
-	fltFile, err := aghrenameio.NewPendingFile(cachePath, 0o644)
+	fltFile, err := aghrenameio.NewPendingFile(cachePath, aghos.DefaultPermFile)
 	if err != nil {
 		return "", nil, fmt.Errorf("creating temp file: %w", err)
 	}
@@ -271,7 +272,7 @@ func parseIntoCache(
 	filePath string,
 	cachePath string,
 ) (parseRes *ParseResult, err error) {
-	tmpFile, err := aghrenameio.NewPendingFile(cachePath, 0o644)
+	tmpFile, err := aghrenameio.NewPendingFile(cachePath, aghos.DefaultPermFile)
 	if err != nil {
 		return nil, fmt.Errorf("creating temp file: %w", err)
 	}

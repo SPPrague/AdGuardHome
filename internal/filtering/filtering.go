@@ -19,12 +19,13 @@ import (
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghhttp"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghos"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering/rulelist"
+	"github.com/AdguardTeam/golibs/container"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/hostsfile"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/mathutil"
-	"github.com/AdguardTeam/golibs/stringutil"
 	"github.com/AdguardTeam/golibs/syncutil"
 	"github.com/AdguardTeam/urlfilter"
 	"github.com/AdguardTeam/urlfilter/filterlist"
@@ -130,6 +131,10 @@ type Config struct {
 	// UserRules is the global list of custom rules.
 	UserRules []string `yaml:"-"`
 
+	// SafeFSPatterns are the patterns for matching which local filtering-rule
+	// files can be added.
+	SafeFSPatterns []string `yaml:"safe_fs_patterns"`
+
 	SafeBrowsingCacheSize uint `yaml:"safebrowsing_cache_size"` // (in bytes)
 	SafeSearchCacheSize   uint `yaml:"safesearch_cache_size"`   // (in bytes)
 	ParentalCacheSize     uint `yaml:"parental_cache_size"`     // (in bytes)
@@ -219,6 +224,9 @@ type Checker interface {
 
 // DNSFilter matches hostnames and DNS requests against filtering rules.
 type DNSFilter struct {
+	// idGen is used to generate IDs for package urlfilter.
+	idGen *idGenerator
+
 	// bufPool is a pool of buffers used for filtering-rule list parsing.
 	bufPool *syncutil.Pool[[]byte]
 
@@ -254,6 +262,8 @@ type DNSFilter struct {
 	refreshLock *sync.Mutex
 
 	hostCheckers []hostChecker
+
+	safeFSPatterns []string
 }
 
 // Filter represents a filter list
@@ -265,7 +275,7 @@ type Filter struct {
 	Data []byte `yaml:"-"`
 
 	// ID is automatically assigned when filter is added using nextFilterID.
-	ID int64 `yaml:"id"`
+	ID rulelist.URLFilterID `yaml:"id"`
 }
 
 // Reason holds an enum detailing why it was filtered or not filtered
@@ -517,11 +527,13 @@ func (d *DNSFilter) ParentalBlockHost() (host string) {
 type ResultRule struct {
 	// Text is the text of the rule.
 	Text string `json:",omitempty"`
+
 	// IP is the host IP.  It is nil unless the rule uses the
 	// /etc/hosts syntax or the reason is FilteredSafeSearch.
 	IP netip.Addr `json:",omitempty"`
+
 	// FilterListID is the ID of the rule's filter list.
-	FilterListID int64 `json:",omitempty"`
+	FilterListID rulelist.URLFilterID `json:",omitempty"`
 }
 
 // Result contains the result of a request check.
@@ -554,6 +566,8 @@ type Result struct {
 	Reason Reason `json:",omitempty"`
 
 	// IsFiltered is true if the request is filtered.
+	//
+	// TODO(d.kolyshev): Get rid of this flag.
 	IsFiltered bool `json:",omitempty"`
 }
 
@@ -624,7 +638,7 @@ func (d *DNSFilter) processRewrites(host string, qtype uint16) (res Result) {
 
 	res.Reason = Rewritten
 
-	cnames := stringutil.NewSet()
+	cnames := container.NewMapSet[string]()
 	origHost := host
 	for matched && len(rewrites) > 0 && rewrites[0].Type == dns.TypeCNAME {
 		rw := rewrites[0]
@@ -692,7 +706,7 @@ func matchBlockedServicesRules(
 
 				ruleText := rule.Text()
 				res.Rules = []*ResultRule{{
-					FilterListID: int64(rule.GetFilterListID()),
+					FilterListID: rule.GetFilterListID(),
 					Text:         ruleText,
 				}}
 
@@ -957,7 +971,7 @@ func makeResult(matchedRules []rules.Rule, reason Reason) (res Result) {
 	resRules := make([]*ResultRule, len(matchedRules))
 	for i, mr := range matchedRules {
 		resRules[i] = &ResultRule{
-			FilterListID: int64(mr.GetFilterListID()),
+			FilterListID: mr.GetFilterListID(),
 			Text:         mr.Text(),
 		}
 	}
@@ -978,14 +992,24 @@ func InitModule() {
 // be non-nil.
 func New(c *Config, blockFilters []Filter) (d *DNSFilter, err error) {
 	d = &DNSFilter{
+		idGen:                  newIDGenerator(int32(time.Now().Unix())),
 		bufPool:                syncutil.NewSlicePool[byte](rulelist.DefaultRuleBufSize),
+		safeSearch:             c.SafeSearch,
 		refreshLock:            &sync.Mutex{},
 		safeBrowsingChecker:    c.SafeBrowsingChecker,
 		parentalControlChecker: c.ParentalControlChecker,
 		confMu:                 &sync.RWMutex{},
 	}
 
-	d.safeSearch = c.SafeSearch
+	for i, p := range c.SafeFSPatterns {
+		// Use Match to validate the patterns here.
+		_, err = filepath.Match(p, "test")
+		if err != nil {
+			return nil, fmt.Errorf("safe_fs_patterns: at index %d: %w", i, err)
+		}
+
+		d.safeFSPatterns = append(d.safeFSPatterns, p)
+	}
 
 	d.hostCheckers = []hostChecker{{
 		check: d.matchSysHosts,
@@ -1014,7 +1038,7 @@ func New(c *Config, blockFilters []Filter) (d *DNSFilter, err error) {
 
 	err = d.prepareRewrites()
 	if err != nil {
-		return nil, fmt.Errorf("rewrites: preparing: %s", err)
+		return nil, fmt.Errorf("rewrites: preparing: %w", err)
 	}
 
 	if d.conf.BlockedServices != nil {
@@ -1029,11 +1053,16 @@ func New(c *Config, blockFilters []Filter) (d *DNSFilter, err error) {
 		if err != nil {
 			d.Close()
 
-			return nil, fmt.Errorf("initializing filtering subsystem: %s", err)
+			return nil, fmt.Errorf("initializing filtering subsystem: %w", err)
 		}
 	}
 
-	_ = os.MkdirAll(filepath.Join(d.conf.DataDir, filterDir), 0o755)
+	err = os.MkdirAll(filepath.Join(d.conf.DataDir, filterDir), aghos.DefaultPermDir)
+	if err != nil {
+		d.Close()
+
+		return nil, fmt.Errorf("making filtering directory: %w", err)
+	}
 
 	d.loadFilters(d.conf.Filters)
 	d.loadFilters(d.conf.WhitelistFilters)
@@ -1041,8 +1070,8 @@ func New(c *Config, blockFilters []Filter) (d *DNSFilter, err error) {
 	d.conf.Filters = deduplicateFilters(d.conf.Filters)
 	d.conf.WhitelistFilters = deduplicateFilters(d.conf.WhitelistFilters)
 
-	updateUniqueFilterID(d.conf.Filters)
-	updateUniqueFilterID(d.conf.WhitelistFilters)
+	d.idGen.fix(d.conf.Filters)
+	d.idGen.fix(d.conf.WhitelistFilters)
 
 	return d, nil
 }

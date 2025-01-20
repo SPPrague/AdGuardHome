@@ -10,6 +10,7 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/configmigrate"
 	"github.com/AdguardTeam/AdGuardHome/internal/version"
 	"github.com/AdguardTeam/golibs/log"
+	"github.com/AdguardTeam/golibs/osutil"
 	"github.com/AdguardTeam/golibs/stringutil"
 )
 
@@ -78,6 +79,10 @@ type options struct {
 	// localFrontend forces AdGuard Home to use the frontend files from disk
 	// rather than the ones that have been compiled into the binary.
 	localFrontend bool
+
+	// noPermCheck disables checking and migration of permissions for the
+	// security-sensitive files.
+	noPermCheck bool
 }
 
 // initCmdLineOpts completes initialization of the global command-line option
@@ -307,6 +312,15 @@ var cmdLineOpts = []cmdLineOpt{{
 	shortName:       "",
 }, {
 	updateWithValue: nil,
+	updateNoValue:   func(o options) (options, error) { o.noPermCheck = true; return o, nil },
+	effect:          nil,
+	serialize:       func(o options) (val string, ok bool) { return "", o.noPermCheck },
+	description: "Skip checking and migration of permissions " +
+		"of security-sensitive files.",
+	longName:  "no-permcheck",
+	shortName: "",
+}, {
+	updateWithValue: nil,
 	updateNoValue:   nil,
 	effect: func(o options, exec string) (effect, error) {
 		return func() error {
@@ -316,7 +330,7 @@ var cmdLineOpts = []cmdLineOpt{{
 				fmt.Println(version.Full())
 			}
 
-			os.Exit(0)
+			os.Exit(osutil.ExitCodeSuccess)
 
 			return nil
 		}, nil

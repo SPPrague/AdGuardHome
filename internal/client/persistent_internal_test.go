@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPersistentClient_EqualIDs(t *testing.T) {
+func TestPersistent_EqualIDs(t *testing.T) {
 	const (
 		ip  = "0.0.0.0"
 		ip1 = "1.1.1.1"

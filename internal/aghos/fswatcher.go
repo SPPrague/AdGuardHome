@@ -6,10 +6,10 @@ import (
 	"io/fs"
 	"path/filepath"
 
+	"github.com/AdguardTeam/golibs/container"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/osutil"
-	"github.com/AdguardTeam/golibs/stringutil"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -46,7 +46,7 @@ type osWatcher struct {
 	events chan event
 
 	// files is the set of tracked files.
-	files *stringutil.Set
+	files *container.MapSet[string]
 }
 
 // osWatcherPref is a prefix for logging and wrapping errors in osWathcer's
@@ -67,7 +67,7 @@ func NewOSWritesWatcher() (w FSWatcher, err error) {
 	return &osWatcher{
 		watcher: watcher,
 		events:  make(chan event, 1),
-		files:   stringutil.NewSet(),
+		files:   container.NewMapSet[string](),
 	}, nil
 }
 
@@ -159,4 +159,35 @@ func (w *osWatcher) handleErrors() {
 	for err := range w.watcher.Errors {
 		log.Error("%s: %s", osWatcherPref, err)
 	}
+}
+
+// EmptyFSWatcher is a no-op implementation of the [FSWatcher] interface.  It
+// may be used on systems not supporting filesystem events.
+type EmptyFSWatcher struct{}
+
+// type check
+var _ FSWatcher = EmptyFSWatcher{}
+
+// Start implements the [FSWatcher] interface for EmptyFSWatcher.  It always
+// returns nil error.
+func (EmptyFSWatcher) Start() (err error) {
+	return nil
+}
+
+// Close implements the [FSWatcher] interface for EmptyFSWatcher.  It always
+// returns nil error.
+func (EmptyFSWatcher) Close() (err error) {
+	return nil
+}
+
+// Events implements the [FSWatcher] interface for EmptyFSWatcher.  It always
+// returns nil channel.
+func (EmptyFSWatcher) Events() (e <-chan event) {
+	return nil
+}
+
+// Add implements the [FSWatcher] interface for EmptyFSWatcher.  It always
+// returns nil error.
+func (EmptyFSWatcher) Add(_ string) (err error) {
+	return nil
 }
